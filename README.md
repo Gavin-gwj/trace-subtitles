@@ -166,7 +166,7 @@ CSS 类名体系（`edvideo.css`）暴露了它的结构：
 | `manifest.json` | MV3 声明；两组 content_scripts（主世界 + 隔离世界）；host 权限只开 4 个域 |
 | `main-world.js` | 跑在页面主世界：读 `getPlayerResponse()` / `getOption('captions','tracklist')`，`fetch` 字幕正文，`postMessage` 桥接 |
 | `subtitles.js` | 纯函数库：`parse()`（json3/srv3）、`segment()`（智能分句）、`hash()`、`findByTime()` |
-| `content.js` | 隔离世界主控：轨道选择、批量翻译、双层字幕渲染、rAF 推进、点词、查词弹窗 |
+| `content.js` | 隔离世界主控：轨道选择、批量翻译、双层字幕渲染、rAF 推进、点词、查词弹窗、生词高亮 |
 | `bg.js` | Service Worker：设置、翻译（Google + MyMemory 降级）、词典、IndexedDB 缓存与生词本 |
 | `overlay.css` | 字幕覆盖层 + 查词弹窗样式 |
 | `popup.html` / `popup.js` | 设置面板 + 生词本管理（搜索/删除/导出/跳回视频） |
@@ -233,7 +233,34 @@ body: q=句子1&q=句子2&q=句子3
 **缓存**：翻译结果与词典结果都写进 IndexedDB（`trace-subs` v1，`translations` + `words` 两个
 store），同一个视频二次打开不再请求网络。
 
-### 过程中修掉的两个真实 bug（值得记录）
+**④ 生词本状态与跨视频高亮**
+
+生词本存在 IndexedDB 的 `words` store（`keyPath: 'word'`，键为小写形式）。围绕它有三条链路：
+
+```
+加入生词本 → word:add → 写 IndexedDB → broadcastWordsChanged()
+                                        └─ chrome.tabs.sendMessage(所有 YouTube 标签页, 'words:changed')
+                                             └─ content.js: loadWordSet() → 拉 word:keys → 更新 Set → 重渲染
+
+内容脚本启动 → loadWordSet() 拉一次全量词表（只传小写单词数组，不传释义）
+渲染字幕 → renderWords() 逐词查 Set，命中就加 trace-saved 类
+
+点击单词 → 并行两件事：查词典 / 问 word:has 是否已收藏
+          → 已收藏则按钮渲染成「✓ 已在生词本」（data-act="remove"），点一下可移除
+```
+
+几个设计取舍：
+
+- **只传单词集合**：`word:keys` 返回 `['so','the',...]` 而不是完整记录。几千个词也才几十 KB，
+  比每次传释义/语境轻得多。
+- **立即本地生效**：点「加入」成功后先把词塞进内存 `Set` 并重渲染，不依赖广播回来 —— 用户
+  看到高亮是**瞬间**的。广播只负责同步**其它已打开的标签页**。
+- **以数据库为准**：打开弹窗时并行问一次 `word:has`，用 IndexedDB 的真实结果校正内存 Set，
+  避免多标签页并发操作导致的内存与磁盘不一致。
+- **广播不需要 `tabs` 权限**：`host_permissions` 已含 `youtube.com`，`chrome.tabs.query({url})`
+  可以直接按 URL 过滤；申请 `tabs` 权限反而会触发"读取浏览记录"的安装警告。
+
+### 过程中修掉的三个真实 bug（值得记录）
 
 **bug 1：跨消息传函数。** `content.js` 曾把 `hash: S.hash` 放进 `chrome.runtime.sendMessage`，
 而消息经过结构化克隆会丢掉函数，SW 侧抛 `TypeError: hashFn is not a function`。
@@ -297,6 +324,9 @@ await Promise.all([dictTask /* 3.5s 超时，失败静默 */, zhTask /* Google �
 - **点击查词**：点字幕里任意单词 → 音标 + 中文释义 + 英文释义 + 例句
 - **生词本**：一键加入，记录单词/释义/**所在句子与译文**/视频标题/时间点，可搜索、删除、
   导出 JSON，点击条目跳回原视频那一秒
+- **生词高亮（跨视频生效）**：任何已加入生词本的单词，在**所有** YouTube 视频的字幕里都会
+  自动高亮（黄色底色 + 下划线），不需要重新加入
+- **状态记忆**：再次点击已加入的词，弹窗按钮显示「✓ 已在生词本」，点一下即可移除
 
 ### 离线验证（不需要登录 YouTube）
 
@@ -330,9 +360,12 @@ node test-pot.js             # pot 签名回归测试 + 截图 shot-pot.png
                     trans="那么今天我们就来谈谈这个插件是如何工作的。"
 segmentation: { rows: 13, sentences: 5 }
 word popup:   { word:"So", zh:"所以", hasAddBtn:true }
-add button:   "✓ 已加入生词本"
+add button:   "✓ 已在生词本"   (btnAct: remove)
 wordbook:     [{ word:"so", zh:"所以", context:"So today we are going to talk about…",
                  videoId:"TESTID00001", time:0 }]
+highlight:    { found:true, hasSavedClass:true, savedCount:1 }
+reopen popup: { btnText:"✓ 已在生词本", btnAct:"remove" }
+checks:       subs=true seg=5 highlight=true reopen=true
 RESULT: PASS
 ```
 

@@ -173,6 +173,8 @@ const WATCH = `${ORIGIN}/watch?v=${fx.VIDEO_ID}`;
   // ---- 点词查词 + 加入生词本 ----
   let wordTest = null;
   let added = null;
+  let highlight = null;
+  let reopenState = null;
   try {
     const w = await page.$('#trace-sub-overlay .trace-word');
     if (w) {
@@ -201,13 +203,20 @@ const WATCH = `${ORIGIN}/watch?v=${fx.VIDEO_ID}`;
 
       // 点击"加入生词本"
       const btn = await page.$('#trace-word-popup [data-act="add"]');
+      let addState = null;
       if (btn) {
         await btn.click();
         await page.waitForTimeout(1500);
-        const btnText = await page.evaluate(
-          () => document.querySelector('#trace-word-popup [data-act="add"]')?.textContent || ''
-        );
-        console.log('add button after click:', JSON.stringify(btnText));
+        addState = await page.evaluate(() => {
+          const p = document.getElementById('trace-word-popup');
+          const b = p?.querySelector('[data-act="remove"]') || p?.querySelector('[data-act="add"]');
+          return {
+            btnText: b?.textContent || '',
+            btnAct: b?.dataset.act || '',
+            isDone: !!p?.querySelector('.trace-pop-add.trace-done'),
+          };
+        });
+        console.log('add button after click:', JSON.stringify(addState));
 
         // 通过 SW 直接核对生词本
         const sw = ctx.serviceWorkers()[0];
@@ -217,6 +226,46 @@ const WATCH = `${ORIGIN}/watch?v=${fx.VIDEO_ID}`;
             return D ? await D.idbAll('words') : null;
           }).catch((e) => ({ err: e.message }));
           console.log('wordbook:', JSON.stringify(added, null, 1));
+        }
+
+        // ---- 高亮断言：当前字幕里该词应带 trace-saved ----
+        const savedWord = (wordTest?.word || '').toLowerCase();
+        highlight = await page.evaluate((w) => {
+          const spans = [...document.querySelectorAll('#trace-sub-overlay .trace-word')];
+          const hit = spans.find((s) => s.dataset.w?.toLowerCase() === w);
+          const savedCount = spans.filter((s) => s.classList.contains('trace-saved')).length;
+          return {
+            found: !!hit,
+            hasSavedClass: !!hit?.classList.contains('trace-saved'),
+            savedCount,
+          };
+        }, savedWord);
+        console.log('highlight:', JSON.stringify(highlight));
+
+        // ---- 重新点击该词：弹窗应显示"已在生词本"，而不是"加入生词本" ----
+        await page.click('#trace-word-popup [data-act="close"]').catch(() => {});
+        await page.waitForTimeout(300);
+        const again = await page.$('#trace-sub-overlay .trace-word');
+        if (again) {
+          await again.click();
+          let reopen = null;
+          for (let i = 0; i < 20; i++) {
+            await page.waitForTimeout(500);
+            reopen = await page.evaluate(() => {
+              const p = document.getElementById('trace-word-popup');
+              if (!p) return { present: false };
+              const b = p.querySelector('[data-act="remove"]') || p.querySelector('[data-act="add"]');
+              return {
+                present: true,
+                loading: !!p.querySelector('.trace-pop-loading'),
+                btnText: b?.textContent || '',
+                btnAct: b?.dataset.act || '',
+              };
+            });
+            if (reopen.present && !reopen.loading) break;
+          }
+          console.log('reopen popup:', JSON.stringify(reopen));
+          reopenState = reopen;
         }
       }
     } else {
@@ -231,7 +280,13 @@ const WATCH = `${ORIGIN}/watch?v=${fx.VIDEO_ID}`;
   console.log('screenshot:', shot);
 
   await ctx.close();
-  const pass = ok && seg && seg.sentences > 0;
+
+  const hlOk = !!(highlight && highlight.found && highlight.hasSavedClass);
+  const reopenOk = !!(reopenState && reopenState.btnAct === 'remove');
+  const pass = ok && seg && seg.sentences > 0 && hlOk && reopenOk;
+  console.log(
+    `\nchecks: subs=${!!ok} seg=${seg?.sentences || 0} highlight=${hlOk} reopen=${reopenOk}`
+  );
   console.log(pass ? '\nRESULT: PASS' : '\nRESULT: FAIL');
   process.exit(pass ? 0 : 1);
 })();

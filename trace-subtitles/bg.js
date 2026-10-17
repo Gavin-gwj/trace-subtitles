@@ -387,8 +387,36 @@ async function listWords() {
   return all.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
 }
 
+/** 只返回单词集合（小写），供内容脚本做高亮比对，比传全量记录轻得多 */
+async function wordKeys() {
+  const all = await idbAll('words');
+  return all.map((w) => w.word);
+}
+
+async function hasWord(word) {
+  if (!word) return false;
+  return !!(await idbGet('words', String(word).toLowerCase()));
+}
+
+/** 通知所有 YouTube 标签页：生词本变了，重新拉取高亮词表 */
+async function broadcastWordsChanged() {
+  try {
+    // host_permissions 已覆盖 youtube.com，chrome.tabs.query 可直接按 URL 过滤，
+    // 不需要额外的 "tabs" 权限（那个会触发"读取浏览记录"警告）。
+    const tabs = await chrome.tabs.query({ url: 'https://*.youtube.com/*' });
+    await Promise.all(
+      tabs.map((t) =>
+        chrome.tabs.sendMessage(t.id, { type: 'words:changed' }).catch(() => {})
+      )
+    );
+  } catch (_) {
+    /* 标签页已关闭或权限不足，忽略：高亮会在下次加载时同步 */
+  }
+}
+
 async function removeWord(word) {
   await idbDel('words', String(word).toLowerCase());
+  await broadcastWordsChanged();
   return true;
 }
 
@@ -439,10 +467,20 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           }
           break;
         case 'word:add':
-          sendResponse({ ok: true, data: await addWord(msg.payload || {}) });
+          {
+            const rec = await addWord(msg.payload || {});
+            await broadcastWordsChanged();
+            sendResponse({ ok: true, data: rec });
+          }
           break;
         case 'word:list':
           sendResponse({ ok: true, data: await listWords() });
+          break;
+        case 'word:keys':
+          sendResponse({ ok: true, data: await wordKeys() });
+          break;
+        case 'word:has':
+          sendResponse({ ok: true, data: await hasWord(msg.word) });
           break;
         case 'word:remove':
           sendResponse({ ok: true, data: await removeWord(msg.word) });
@@ -483,4 +521,8 @@ globalThis.__traceDebug = {
   translateWithCache,
   translateBatch,
   lookupWord,
+  addWord,
+  listWords,
+  wordKeys,
+  hasWord,
 };

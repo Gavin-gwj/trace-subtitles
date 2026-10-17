@@ -66,6 +66,8 @@
     ready: false,
     translating: false,
     wordPopup: null,
+    /** 已加入生词本的单词（小写），用于全站高亮 */
+    wordSet: new Set(),
   };
 
   // ------------------------------------------------------------ DOM
@@ -111,7 +113,7 @@
     transEl.classList.toggle('trace-loading', !sentence.zh && state.translating);
   }
 
-  /** 把原文拆成可点击的单词 span，保留标点 */
+  /** 把原文拆成可点击的单词 span，保留标点；已加入生词本的单词额外加 trace-saved */
   function renderWords(text) {
     return text
       .split(/(\s+)/)
@@ -120,9 +122,12 @@
         const m = tok.match(/^([^\p{L}\p{N}']*)([\p{L}\p{N}'-]+)([^\p{L}\p{N}']*)$/u);
         if (!m) return escapeHtml(tok);
         const [, pre, word, post] = m;
+        const saved = state.wordSet.has(word.toLowerCase());
         return (
           escapeHtml(pre) +
-          `<span class="trace-word" data-w="${escapeAttr(word)}">${escapeHtml(word)}</span>` +
+          `<span class="trace-word${saved ? ' trace-saved' : ''}" data-w="${escapeAttr(word)}">` +
+          escapeHtml(word) +
+          '</span>' +
           escapeHtml(post)
         );
       })
@@ -389,13 +394,36 @@
             },
           });
           if (r && r.ok) {
-            btn.textContent = '✓ 已加入生词本';
+            btn.textContent = '✓ 已在生词本';
             btn.classList.add('trace-done');
+            btn.disabled = true;
+            btn.dataset.act = 'remove';
+            // 立刻本地生效：高亮当前字幕里所有该词，无需等广播
+            state.wordSet.add(String(d.word || '').toLowerCase());
+            refreshActiveWords();
           } else {
             btn.textContent = '添加失败';
           }
         } catch (e) {
           btn.textContent = '添加失败';
+        }
+      }
+      if (act === 'remove') {
+        const d = state.wordPopup;
+        if (!d) return;
+        btn.disabled = true;
+        btn.textContent = '移除中…';
+        try {
+          await chrome.runtime.sendMessage({ type: 'word:remove', word: d.word });
+          btn.textContent = '＋ 加入生词本';
+          btn.classList.remove('trace-done');
+          btn.disabled = false;
+          btn.dataset.act = 'add';
+          state.wordSet.delete(String(d.word || '').toLowerCase());
+          refreshActiveWords();
+        } catch (e) {
+          btn.textContent = '✓ 已在生词本';
+          btn.disabled = false;
         }
       }
     });
@@ -411,7 +439,12 @@
 
     const rect = el.getBoundingClientRect();
     const pop = ensurePopup();
-    state.wordPopup = { word, context: state.active?.text || '', contextZh: state.active?.zh || '' };
+    state.wordPopup = {
+      word,
+      saved: state.wordSet.has(word.toLowerCase()),
+      context: state.active?.text || '',
+      contextZh: state.active?.zh || '',
+    };
 
     pop.innerHTML = `
       <div class="trace-pop-head">
@@ -422,11 +455,23 @@
     pop.classList.remove('trace-hidden');
     positionPopup(pop, rect);
 
+    // 查词与"是否已在生词本"并行，后者很快，先更新一次状态
+    const savedTask = chrome.runtime
+      .sendMessage({ type: 'word:has', word })
+      .then((r) => (r && r.ok ? !!r.data : false))
+      .catch(() => state.wordPopup?.saved || false);
+
     let dict = null;
     try {
       const r = await chrome.runtime.sendMessage({ type: 'dict', word });
       if (r && r.ok) dict = r.data;
     } catch (_) {}
+
+    const saved = await savedTask;
+    if (state.wordPopup) state.wordPopup.saved = saved;
+    // 以服务端（IndexedDB）结果为准同步高亮集合
+    if (saved) state.wordSet.add(word.toLowerCase());
+    else state.wordSet.delete(word.toLowerCase());
 
     if (!dict) {
       pop.querySelector('.trace-pop-body').innerHTML =
@@ -434,7 +479,7 @@
       return;
     }
 
-    state.wordPopup = { ...state.wordPopup, ...dict };
+    state.wordPopup = { ...state.wordPopup, ...dict, saved };
     const meanings = (dict.meanings || [])
       .slice(0, 4)
       .map((m) => `<li><i>${escapeHtml(m.pos)}</i> ${escapeHtml(m.def)}</li>`)
@@ -445,8 +490,14 @@
       ${meanings ? `<ul class="trace-pop-meanings">${meanings}</ul>` : ''}
       ${dict.example ? `<div class="trace-pop-ex">“${escapeHtml(dict.example)}”</div>` : ''}
       <div class="trace-pop-actions">
-        <button class="trace-pop-add" data-act="add">＋ 加入生词本</button>
+        ${
+          saved
+            ? '<button class="trace-pop-add trace-done" data-act="remove">✓ 已在生词本</button>'
+            : '<button class="trace-pop-add" data-act="add">＋ 加入生词本</button>'
+        }
       </div>`;
+    // 内容渲染后弹窗变高了，必须重新定位，否则会压住字幕
+    positionPopup(pop, rect);
   }
 
   function positionPopup(pop, rect) {
@@ -454,20 +505,52 @@
     const w = 300;
     let left = rect.left + rect.width / 2 - w / 2;
     left = Math.max(pad, Math.min(left, window.innerWidth - w - pad));
-    let top = rect.top - 12;
     pop.style.width = w + 'px';
     pop.style.left = left + 'px';
-    // 先放上去再测量高度
+
+    // 先放到 0 处测量真实高度
     pop.style.top = '0px';
     const h = pop.offsetHeight || 200;
-    top = rect.top - h - 12;
-    if (top < pad) top = rect.bottom + 12;
-    pop.style.top = top + 'px';
+
+    // 优先放在单词上方；但要避开整块字幕区域，别把正在看的字幕挡住
+    const box = overlayEl ? overlayEl.querySelector('.trace-sub-box') : null;
+    const boxRect = box ? box.getBoundingClientRect() : null;
+    let top = rect.top - h - 12;
+    if (boxRect && top + h > boxRect.top - 8) {
+      // 会被字幕挡住 → 整体移到字幕块上方
+      top = boxRect.top - h - 8;
+    }
+    // 上方放不下 → 放到字幕块下方；再不行就贴顶
+    if (top < pad) {
+      const below = boxRect ? boxRect.bottom + 8 : rect.bottom + 12;
+      top = below + h <= window.innerHeight - pad ? below : pad;
+    }
+    pop.style.top = Math.round(top) + 'px';
   }
 
   function hidePopup() {
     if (popupEl) popupEl.classList.add('trace-hidden');
     state.wordPopup = null;
+  }
+
+  // ------------------------------------------------------------ 生词高亮
+
+  /** 重新渲染当前这一句，让新增/移除的生词高亮立刻生效 */
+  function refreshActiveWords() {
+    if (state.active && overlayEl) origEl.innerHTML = renderWords(state.active.text);
+  }
+
+  /** 从后台拉取生词表，更新高亮集合 */
+  async function loadWordSet() {
+    try {
+      const r = await chrome.runtime.sendMessage({ type: 'word:keys' });
+      if (r && r.ok && Array.isArray(r.data)) {
+        state.wordSet = new Set(r.data.map((w) => String(w).toLowerCase()));
+        refreshActiveWords();
+      }
+    } catch (_) {
+      /* 忽略：高亮是增强功能，失败不影响字幕 */
+    }
   }
 
   document.addEventListener('click', (e) => {
@@ -510,6 +593,7 @@
     buildOverlay();
     applySettingsToOverlay();
     state.videoId = getVideoId();
+    loadWordSet();
     startLoop();
 
     // 监听页面切换 / 播放器就绪
@@ -530,6 +614,10 @@
       applySettingsToOverlay();
       if (state.active) renderActive(state.active);
       if (msg.retranslate) translateAll();
+      sendResponse({ ok: true });
+    }
+    if (msg.type === 'words:changed') {
+      loadWordSet();
       sendResponse({ ok: true });
     }
     return false;

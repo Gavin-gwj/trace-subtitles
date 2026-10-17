@@ -73,6 +73,18 @@
   color: #fff;
 }
 
+/* 已加入生词本的单词：全站持续高亮（下划线 + 淡黄底），悬停更亮 */
+#trace-sub-overlay .trace-word.trace-saved {
+  color: #ffe08a;
+  background: rgba(255, 200, 60, .18);
+  box-shadow: inset 0 -2px 0 rgba(255, 200, 60, .85);
+  padding: 0 1px;
+}
+#trace-sub-overlay .trace-word.trace-saved:hover {
+  background: rgba(255, 200, 60, .34);
+  color: #fff;
+}
+
 /* ------------------------------------------------------------ 查词弹窗 */
 
 #trace-word-popup {
