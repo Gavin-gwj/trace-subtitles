@@ -234,7 +234,6 @@ body: q=句子1&q=句子2&q=句子3
 store），同一个视频二次打开不再请求网络。
 
 **④ 生词本状态与跨视频高亮**
-
 生词本存在 IndexedDB 的 `words` store（`keyPath: 'word'`，键为小写形式）。围绕它有三条链路：
 
 ```
@@ -260,7 +259,7 @@ store），同一个视频二次打开不再请求网络。
 - **广播不需要 `tabs` 权限**：`host_permissions` 已含 `youtube.com`，`chrome.tabs.query({url})`
   可以直接按 URL 过滤；申请 `tabs` 权限反而会触发"读取浏览记录"的安装警告。
 
-### 过程中修掉的三个真实 bug（值得记录）
+### 过程中修掉的五个真实 bug（值得记录）
 
 **bug 1：跨消息传函数。** `content.js` 曾把 `hash: S.hash` 放进 `chrome.runtime.sendMessage`，
 而消息经过结构化克隆会丢掉函数，SW 侧抛 `TypeError: hashFn is not a function`。
@@ -303,6 +302,83 @@ await Promise.all([dictTask /* 3.5s 超时，失败静默 */, zhTask /* Google �
 为此新增了专门的回归测试 `tools/test-pot.js`：把站点伪造成 pot 模式
 （不带 pot → 空 body，带 pot → 正常 json3），断言字幕必须从 `hook` 路径拿到。
 
+**bug 4：翻译竞态 —— 选 Google 时"只有英文没有译文"。**
+
+现象：选 Google 引擎时字幕只有原文，切到 MyMemory 就正常。第一反应是"Google 被限流/被封"，
+于是写了一轮压力测试把它排除掉：
+
+- 800 句 × 25 句/批共 32 批 → 全部 200、`empty:0`；
+- 连续 12 批 × 40 条（模拟真实视频）→ 12 批全 200，耗时 332–874ms，`empty:0`；
+- 各种特殊字符（`& # % " < >`）、超长句、含换行 → 全部正常。
+
+也就是说**引擎侧完全没问题**，问题在我们的代码。真正的根因有两个，叠在一起：
+
+1. **并发竞态（主因）**：`loadSubtitles` 会被 `init` 和 `yt-page-data-updated` 触发两次。
+   第二次重建 `state.sentences` 后调 `translateAll()`，而旧版 `translateAll` 开头是
+   `if (state.translating) return;` —— 于是第二轮直接退出，但它已经把
+   `state.sentences` 换成了**全新的、没有 `zh` 字段的对象**。第一轮的译文写进的是
+   旧对象，新对象永远空白 → 界面只有原文。
+   修复：用**代际令牌** `translateGen` 代替布尔锁。
+
+   ```js
+   let translateGen = 0;
+   async function translateAll() {
+     const gen = ++translateGen;               // 每次启动拿新代号
+     for (const chunk of batches) {
+       if (gen !== translateGen) return;       // 旧轮次自觉退出
+       await translateChunk(chunk, …, gen);
+     }
+     if (gen === translateGen) state.translating = false;  // 只有当前轮能收尾
+   }
+   ```
+
+2. **空串被当成"翻译成功"**：`googleTranslate` 把 `""` 原样返回且**不抛错**，于是
+   `translateBatch` 的 catch 降级分支永不触发，`""` 还会被写进 IndexedDB 缓存
+   （脏数据一旦落库，重开视频也修不好）。
+   修复：`googleOnce` 里判定"整批为空 / 译文与原文完全相同（语言猜错）"都算失败并继续
+   试下一个方案；缓存命中条件收紧为 `hit.text.trim()`。
+
+同时把降级链做成**逐级拆分**，应对真实视频中途限流：
+
+```
+整批 40 条 → 成功 ≥60% 就收
+           → 否则对半拆 → 再拆 → 单条
+           → 仍失败的用 MyMemory 补（每批上限 60 条，避免打光额度）
+```
+
+**bug 5：自由拖动后字幕框"往右长"，文字看起来在乱动。**
+
+现象：拖到某个位置后，句子变长时框向右扩展、变短时缩回左边，视觉上字幕左右横跳。
+
+根因：自由模式下把鼠标位置直接写进了 `left`，而 `left` 是**左边缘**坐标；
+框宽 `width: max-content` 随句子变化，左边缘固定 → 右边缘伸缩 → 视觉中心漂移。
+
+修复：改成**按中心点定位**，并在每次重渲染后重新夹紧：
+
+```css
+[data-free="1"] .trace-sub-box {
+  transform: translateX(-50%);   /* 保留，让 left 成为中心点 */
+}
+```
+
+```js
+function clampCenterX(cx) {
+  const half = (boxEl.getBoundingClientRect().width || 0) / 2;
+  return Math.max(half + 4, Math.min(window.innerWidth - half - 4, cx));
+}
+// 拖动时、以及 renderActive() 每次换句后都调一次
+```
+
+回归测试 `tools/test-center.js` 实测：短句 879px / 长句 1232px，两者中心都是 620px，
+`driftPx: 0`；拖到最左边时 `leftEdge: 4`，正确被夹在视口内。
+
+> 顺带记一个**测试台自身的坑**：早期用
+> `Object.defineProperty(video, 'currentTime', { get: … })` 伪造播放进度，
+> 但那个只改到**主世界**的 DOM wrapper，内容脚本跑在隔离世界读到的是原生
+> `currentTime`（mock 里没有真实媒体，恒为 0），导致字幕永远停在第 1 句、
+> 所有"换句"断言其实都没生效。改用 `canvas.captureStream(25)` 喂给 `video`
+> 后两个世界才共享同一条真实时间轴。教训：**跨世界伪造 DOM 属性是无效的**。
+
 ---
 
 ## 三、安装与使用
@@ -323,6 +399,7 @@ await Promise.all([dictTask /* 3.5s 超时，失败静默 */, zhTask /* Google �
 - **字号、字幕位置**：popup 里实时调
 - **毛玻璃字幕框**：深色半透明底 + `backdrop-filter: blur(18px)`，透出画面纹理而不是死黑板
 - **自由拖动**：鼠标移到字幕框上，顶部浮出黑色胶囊（3 个白点）→ 按住即可拖到任意位置；
+  **拖动后按"中心点"定位**，句子变长变短都从中心向两侧对称伸缩，不会左右横跳；
   位置自动记住，换视频/刷新都保持；popup 里「恢复居中」可回到默认底部位置
 - **点击查词**：点字幕里任意单词 → 音标 + 中文释义 + 英文释义 + 例句
 - **生词本**：一键加入，记录单词/释义/**所在句子与译文**/视频标题/时间点，可搜索、删除、
@@ -344,9 +421,9 @@ node mock/server.js          # 起本地夹具站点
 ```bash
 cd tools
 npm i                        # 安装 playwright
-node test-mock.js            # 基础链路，输出 PASS/FAIL + 截图 shot-mock.png
+node test-mock.js            # 基础链路 + 查词 + 生词本 + 高亮，输出 PASS/FAIL + shot-mock.png
 node test-pot.js             # pot 签名回归测试 + 截图 shot-pot.png
-node test-drag.js            # 毛玻璃 + 拖动 + 位置持久化 + 截图 shot-drag.png
+node test-center.js          # 拖动后按中心点定位（长短句不左右跳）+ 截图 shot-center.png
 ```
 
 `tools/mock/` 用 Playwright `page.route()` 整体伪造 `https://www.youtube.com/**`，
@@ -381,6 +458,16 @@ timedtext hits: [{ hasPot: true, pot: "MOCK_POT_TOKEN" }]
 RESULT: PASS (网络钩子成功绕过 pot 限制)
 ```
 
+居中回归（拖动后短句 879px / 长句 1232px，中心完全不动）：
+
+```
+centerAfterDrag: 760   followsCursor: true
+leftEdgeAfterClamp: 4  leftCenterAfterClamp: 620  clampedInside: true
+shortWidth: 879   longWidth: 1232
+shortCenter: 620  longCenter: 620   driftPx: 0
+RESULT: PASS（中心不漂移 + 跟随鼠标 + 不溢出视口 + 至少两句不同长度）
+```
+
 ---
 
 ## 四、目录结构
@@ -400,15 +487,15 @@ D:\MyFiles\项目\Trace\
 └─ tools\                       ← 逆向与验证工具（非扩展的一部分）
    ├─ mock\fixtures.js          测试夹具（假播放器 + 13 条碎片字幕 + pot 模式）
    ├─ mock\server.js            本地夹具站点 :8899
-   ├─ test-mock.js              端到端自动化测试
+   ├─ test-mock.js              端到端自动化测试（字幕/查词/生词本/高亮）
    ├─ test-pot.js               pot 签名回归测试
-   ├─ test-drag.js              毛玻璃 + 拖动 + 位置持久化测试
-   ├─ shot-glass.js             截图脚本（等字幕渲染后截毛玻璃效果）
-   ├─ probe-*.js                逆向探针（网络端点、SW 能力、查词分步、get_transcript）
+   ├─ test-center.js            拖动后中心点定位回归测试
+   ├─ probe-ext2\               主世界 vs 隔离世界对照实验
+   ├─ probe-transcript.js       get_transcript 接口探针
    ├─ gen-icons.js              纯 Node 生成 PNG 图标
-   ├─ shot-mock.png             验证截图
+   ├─ shot-mock.png             验证截图（高亮 + 查词卡）
    ├─ shot-pot.png              pot 模式验证截图
-   ├─ shot-drag.png             拖动后截图
+   ├─ shot-center.png           居中验证截图
    └─ shot-glass.png            毛玻璃 + 3 点拖动胶囊截图
 ```
 

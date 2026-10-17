@@ -134,16 +134,18 @@ function pageHtml(videoId = VIDEO_ID, opts = {}) {
     });
   }
 
-  // ---- 用 canvas 画个走动的画面，并把 video.currentTime 变成可控时间轴 ----
+  // ---- 用 canvas 画个走动的画面，并用 captureStream 喂给 video ----
+  // 关键教训：不能用 Object.defineProperty(v,'currentTime') 伪造时间——
+  // 那个只在主世界生效，内容脚本跑在隔离世界，读到的是原生 currentTime（恒为 0），
+  // 表现为字幕永远停在第 1 句。必须给 video 真实的媒体流，两个世界才看到同一条时间轴。
   (function () {
     const v = document.querySelector('video');
     const c = document.querySelector('canvas');
     const ctx = c.getContext('2d');
     const t0 = performance.now();
-    const now = () => ((performance.now() - t0) / 1000) % TOTAL;
 
     function draw() {
-      const p = now();
+      const p = ((performance.now() - t0) / 1000) % TOTAL;
       ctx.fillStyle = 'hsl(' + (p * 20) + ', 42%, 20%)';
       ctx.fillRect(0, 0, 960, 540);
       ctx.fillStyle = 'rgba(255,255,255,.9)';
@@ -156,14 +158,14 @@ function pageHtml(videoId = VIDEO_ID, opts = {}) {
     }
     draw();
 
-    // 关键：让扩展读到的 currentTime 是真实推进的时间
-    Object.defineProperty(v, 'currentTime', {
-      get: () => now(),
-      set: () => {},
-      configurable: true,
-    });
-    Object.defineProperty(v, 'duration', { get: () => TOTAL, configurable: true });
-    Object.defineProperty(v, 'paused', { get: () => false, configurable: true });
+    // MediaStream 不支持 seek，currentTime 从 0 开始真实推进；
+    // 所以测试用「自然播放 + 多次采样」验证，而不是跳到某个时间点。
+    v.srcObject = c.captureStream(25);
+    v.play().catch(() => {});
+    // 查词/生词本断言需要字幕停在当前句，用暂停把时间轴钉住（真实暂停，两个世界都看得到）
+    window.__mockPause = () => v.pause();
+    window.__mockPlay = () => v.play().catch(() => {});
+    window.__mockReady = true;
   })();
 </script>
 </body>

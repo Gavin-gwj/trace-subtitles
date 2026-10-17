@@ -39,11 +39,12 @@
   transition: box-shadow .18s ease, background-color .18s ease;
 }
 
-/* 自由拖拽定位：由 JS 写 left/top，取消默认的居中与底部定位 */
+/* 自由拖拽定位：由 JS 写 left（= 框的水平中心）/top。
+   关键：始终保留 translateX(-50%)，让字幕框以“中心点”对齐，
+   这样句子长短变化时文字向两侧对称伸缩，不会整体左右乱跳。 */
 #trace-sub-overlay[data-free="1"] .trace-sub-box {
-  left: auto;
   bottom: auto;
-  transform: none;
+  transform: translateX(-50%);
 }
 
 #trace-sub-overlay .trace-sub-box.trace-dragging {

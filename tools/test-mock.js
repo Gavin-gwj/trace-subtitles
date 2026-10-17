@@ -176,6 +176,10 @@ const WATCH = `${ORIGIN}/watch?v=${fx.VIDEO_ID}`;
   let highlight = null;
   let reopenState = null;
   try {
+    // 先暂停播放：查词/生词本/高亮断言都要求字幕停在当前句，
+    // 否则真实时间轴推进会让字幕换句，断言目标词就不在屏幕上了。
+    await page.evaluate(() => window.__mockPause && window.__mockPause());
+    await page.waitForTimeout(400);
     const w = await page.$('#trace-sub-overlay .trace-word');
     if (w) {
       await w.click();

@@ -96,7 +96,11 @@
     initDrag();
   }
 
-  /** 把保存的自由位置应用到字幕框 */
+  /**
+   * 把保存的自由位置应用到字幕框。
+   * pos.x 存的是**字幕框水平中心**（不是左边缘），配合 CSS 的 translateX(-50%)，
+   * 句子变长变短时框会向两侧对称伸缩，视觉上始终居中于拖动点。
+   */
   function applyFreePosition(pos) {
     if (!boxEl) return;
     if (!pos) {
@@ -106,11 +110,20 @@
       return;
     }
     overlayEl.dataset.free = '1';
-    boxEl.style.left = pos.x + 'px';
+    boxEl.style.left = clampCenterX(pos.x) + 'px';
     boxEl.style.top = pos.y + 'px';
   }
 
-  /** 拖拽：按住顶部手柄移动字幕框，位置持久化 */
+  /** 把中心 x 限制在视口内，保证整块字幕都看得见 */
+  function clampCenterX(cx) {
+    const half = (boxEl?.offsetWidth || 0) / 2;
+    const min = half + 4;
+    const max = window.innerWidth - half - 4;
+    if (max < min) return window.innerWidth / 2;
+    return Math.round(Math.max(min, Math.min(cx, max)));
+  }
+
+  /** 拖拽：按住顶部手柄移动字幕框，位置持久化（记录的是框的中心点） */
   function initDrag() {
     let drag = null;
 
@@ -119,7 +132,8 @@
       ev.preventDefault();
       ev.stopPropagation();
       const r = boxEl.getBoundingClientRect();
-      drag = { dx: ev.clientX - r.left, dy: ev.clientY - r.top };
+      // 记录指针相对“框中心”的偏移，拖动过程中中心点跟随指针，且不随句子长短漂移
+      drag = { dx: ev.clientX - (r.left + r.width / 2), dy: ev.clientY - r.top };
       boxEl.classList.add('trace-dragging');
       handleEl.setPointerCapture?.(ev.pointerId);
     };
@@ -127,13 +141,11 @@
     const onMove = (ev) => {
       if (!drag) return;
       ev.preventDefault();
-      // 限制在视口内，避免拖丢
-      const r = boxEl.getBoundingClientRect();
-      const maxX = window.innerWidth - r.width - 4;
-      const maxY = window.innerHeight - r.height - 4;
-      const x = Math.max(4, Math.min(ev.clientX - drag.dx, Math.max(4, maxX)));
+      const h = boxEl.offsetHeight || 0;
+      const cx = clampCenterX(ev.clientX - drag.dx);
+      const maxY = window.innerHeight - h - 4;
       const y = Math.max(4, Math.min(ev.clientY - drag.dy, Math.max(4, maxY)));
-      applyFreePosition({ x: Math.round(x), y: Math.round(y) });
+      applyFreePosition({ x: cx, y: Math.round(y) });
     };
 
     const onUp = () => {
@@ -141,7 +153,7 @@
       drag = null;
       boxEl.classList.remove('trace-dragging');
       const pos = {
-        x: parseFloat(boxEl.style.left) || 0,
+        x: parseFloat(boxEl.style.left) || window.innerWidth / 2,
         y: parseFloat(boxEl.style.top) || 0,
       };
       savePosition(pos);
@@ -152,13 +164,13 @@
     window.addEventListener('pointerup', onUp);
     window.addEventListener('pointercancel', onUp);
 
-    // 窗口尺寸变化时，避免字幕框跑到视口外
+    // 窗口尺寸变化时，重新夹紧中心点，避免字幕框跑到视口外
     window.addEventListener('resize', () => {
       if (!state.settings?.freePos || !boxEl) return;
-      const r = boxEl.getBoundingClientRect();
-      const x = Math.min(parseFloat(boxEl.style.left) || 0, Math.max(4, window.innerWidth - r.width - 4));
-      const y = Math.min(parseFloat(boxEl.style.top) || 0, Math.max(4, window.innerHeight - r.height - 4));
-      applyFreePosition({ x: Math.round(x), y: Math.round(y) });
+      const cx = parseFloat(boxEl.style.left) || window.innerWidth / 2;
+      const h = boxEl.offsetHeight || 0;
+      const y = Math.min(parseFloat(boxEl.style.top) || 0, Math.max(4, window.innerHeight - h - 4));
+      applyFreePosition({ x: clampCenterX(cx), y: Math.round(y) });
     });
   }
 
@@ -196,6 +208,11 @@
     origEl.innerHTML = renderWords(sentence.text);
     transEl.textContent = sentence.zh || '';
     transEl.classList.toggle('trace-loading', !sentence.zh && state.translating);
+    // 句子变长/变短后框宽会变，自由模式下重新夹紧中心点，避免贴边溢出
+    if (state.settings?.freePos) {
+      const cx = parseFloat(boxEl?.style.left) || window.innerWidth / 2;
+      if (boxEl) boxEl.style.left = clampCenterX(cx) + 'px';
+    }
   }
 
   /** 把原文拆成可点击的单词 span，保留标点；已加入生词本的单词额外加 trace-saved */
@@ -320,37 +337,120 @@
     startDomFallback();
   }
 
+  // 每次翻译启动都拿一个自增代号。字幕重新加载时旧的一轮必须作废，
+  // 否则会出现「旧批次把译文写进已丢弃的句子对象，新句子永远没译文」的竞态。
+  let translateGen = 0;
+
   async function translateAll() {
-    if (state.translating || !state.sentences.length) return;
+    if (!state.sentences.length) return;
+    const gen = ++translateGen;
     state.translating = true;
     const target = state.settings?.targetLang || 'zh-CN';
 
-    // 分批送翻译，边翻边渲染，不必等全部完成
-    const BATCH = 25;
-    for (let i = 0; i < state.sentences.length; i += BATCH) {
-      const chunk = state.sentences.slice(i, i + BATCH);
-      const texts = chunk.map((s) => s.text);
+    try {
+      // 分批送翻译，边翻边渲染，不必等全部完成
+      const BATCH = 25;
+      for (let i = 0; i < state.sentences.length; i += BATCH) {
+        if (gen !== translateGen) return; // 已被更新的一轮取代
+        const chunk = state.sentences.slice(i, i + BATCH);
+        await translateChunk(chunk, chunk.map((s) => s.text), target, gen);
+        if (gen !== translateGen) return;
+        if (state.active) renderActive(state.active);
+        await new Promise((r) => setTimeout(r, 80));
+      }
+
+      // 收尾：对仍然没有译文的句子再补一轮（网络抖动/限流时很常见）
+      const missing = state.sentences.filter((s) => !s.zh);
+      if (missing.length && gen === translateGen) {
+        console.info(`[Trace] 补翻 ${missing.length} 句缺失译文`);
+        const mChunk = missing.slice(0, 40);
+        await translateChunk(mChunk, mChunk.map((s) => s.text), target, gen);
+      }
+    } catch (e) {
+      console.warn('[Trace] 翻译流程异常', e);
+    } finally {
+      // 只有当前这一轮才有权收尾，避免把新一轮的 translating 提前清掉
+      if (gen === translateGen) {
+        state.translating = false;
+        const total = state.sentences.length;
+        const done = state.sentences.filter((s) => s.zh).length;
+        console.info(`[Trace] 译文就绪 ${done}/${total} 句（引擎 ${state.settings?.engine}）`);
+        if (done < total) {
+          console.warn(
+            `[Trace] 有 ${total - done} 句没拿到译文。可尝试：① popup 里换翻译引擎；` +
+              '② 刷新页面重试；③ 把这条日志反馈给开发者'
+          );
+        }
+        if (state.active) renderActive(state.active);
+      }
+    }
+  }
+
+  /**
+   * 带超时的 sendMessage。
+   *
+   * MV3 的 service worker 会空闲休眠；长视频要翻几百句时，如果后台在两次
+   * 消息之间被回收，原生的 sendMessage 会一直挂着（或直接 reject
+   * "message port closed"），表现出来就是"翻译到一半没了"。
+   * 这里统一加超时，让上层能重试。
+   */
+  function sendMsg(msg, ms = 20000) {
+    return new Promise((resolve, reject) => {
+      let done = false;
+      const timer = setTimeout(() => {
+        if (done) return;
+        done = true;
+        reject(new Error('message timeout: ' + msg.type));
+      }, ms);
       try {
-        const out = await chrome.runtime.sendMessage({
+        chrome.runtime.sendMessage(msg, (res) => {
+          if (done) return;
+          done = true;
+          clearTimeout(timer);
+          const err = chrome.runtime.lastError;
+          if (err) reject(new Error(err.message || String(err)));
+          else resolve(res);
+        });
+      } catch (e) {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        reject(e);
+      }
+    });
+  }
+
+  /** 翻译一小批句子，失败自动重试一次 */
+  async function translateChunk(chunk, texts, target, gen) {
+    // 源语言用轨道声明的语言；轨道没给就交给后台 auto 探测
+    const source = state.track?.languageCode || 'auto';
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const out = await sendMsg({
           type: 'translate',
           texts,
-          source: state.track?.languageCode || 'auto',
+          source,
           target,
-        });
-        if (out && out.ok) {
+        }, 30000);
+        if (gen != null && gen !== translateGen) return; // 结果过期，丢弃
+        if (out && out.ok && Array.isArray(out.data)) {
+          let filled = 0;
           out.data.forEach((zh, j) => {
-            chunk[j].zh = zh;
+            if (zh && String(zh).trim() && chunk[j]) {
+              chunk[j].zh = zh;
+              filled++;
+            }
           });
+          if (filled) return;
+        }
+        if (out && out.ok === false) {
+          console.warn('[Trace] 后台翻译报错', out.error);
         }
       } catch (e) {
-        console.warn('[Trace] 翻译失败', e);
+        console.warn(`[Trace] 翻译请求失败（第 ${attempt + 1} 次）`, e.message || e);
       }
-      // 立刻刷新当前句
-      if (state.active) renderActive(state.active);
-      await new Promise((r) => setTimeout(r, 80));
+      if (attempt < 2) await new Promise((r) => setTimeout(r, 500 + attempt * 700));
     }
-    state.translating = false;
-    if (state.active) renderActive(state.active);
   }
 
   // ------------------------------------------------------------ 时间同步
@@ -695,10 +795,23 @@
 
   chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     if (msg.type === 'settings:changed') {
+      const prevTarget = state.settings?.targetLang;
+      const prevEngine = state.settings?.engine;
       state.settings = msg.settings;
       applySettingsToOverlay();
+      // 目标语言或引擎变了，旧译文全部作废（否则会串语言 / 残留失败结果）
+      if (
+        state.sentences.length &&
+        (prevTarget !== state.settings.targetLang || prevEngine !== state.settings.engine)
+      ) {
+        state.sentences.forEach((s) => {
+          s.zh = '';
+        });
+      }
       if (state.active) renderActive(state.active);
-      if (msg.retranslate) translateAll();
+      if (msg.retranslate || (state.sentences.length && state.sentences.some((s) => !s.zh))) {
+        translateAll();
+      }
       sendResponse({ ok: true });
     }
     if (msg.type === 'words:changed') {

@@ -147,38 +147,89 @@ function normLang(l) {
 /**
  * Google 免费端点：支持一次多 q，按行返回。
  * 这是 Trancy 这类插件最常用的零成本方案。
+ *
+ * 实测坑（真实视频里会踩到）：
+ *  1. 某些情况下它返回 200 + 空数组/空串，**不抛错**。若直接把它当译文，
+ *     界面上就是"只有原文、没有译文"，而且永远不会触发降级 —— 必须主动校验。
+ *  2. 原文里偶发的孤立代理项（被截断的 emoji）会让 encodeURIComponent 抛
+ *     URIError，整批请求直接失败。
+ *  3. sl 猜错时会"原样返回"（例如中文视频被当成 zh→zh），表现为没有翻译。
  */
-async function googleTranslate(texts, source, target) {
-  const sl = source === 'auto' ? 'auto' : normLang(source);
-  const tl = normLang(target);
+
+/** 去掉孤立代理项，避免 encodeURIComponent 抛 URIError */
+function sanitizeForQuery(s) {
+  return String(s).replace(
+    /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g,
+    ''
+  );
+}
+
+/** 请求一次 Google 端点，返回按顺序的译文数组；结构异常时抛错 */
+async function googleOnce(texts, sl, tl, host, client) {
   const url =
-    'https://translate.googleapis.com/translate_a/t?client=gtx' +
+    `https://${host}/translate_a/t?client=${client}` +
     `&sl=${encodeURIComponent(sl)}&tl=${encodeURIComponent(tl)}&dt=t`;
 
-  const body = texts.map((t) => 'q=' + encodeURIComponent(t)).join('&');
-  const res = await fetchT(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8' },
-    body,
-  }, 10000);
+  const body = texts.map((t) => 'q=' + encodeURIComponent(sanitizeForQuery(t))).join('&');
+  const res = await fetchT(
+    url,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8' },
+      body,
+    },
+    10000
+  );
   if (!res.ok) throw new Error('google http ' + res.status);
+
   const json = await res.json();
-  // 返回形如 [["译1"],["译2"]] 或 ["译1","译2"]（单条）
-  const out = [];
+  // 返回形如 ["译1","译2"] 或 [["译1","en"],["译2","en"]]
   const arr = Array.isArray(json) ? json : [];
+  const out = [];
   for (let i = 0; i < texts.length; i++) {
     const item = arr[i];
-    if (item == null) {
-      out.push('');
-    } else if (typeof item === 'string') {
-      out.push(item);
-    } else if (Array.isArray(item)) {
-      out.push(String(item[0] ?? ''));
-    } else {
-      out.push('');
-    }
+    if (item == null) out.push('');
+    else if (typeof item === 'string') out.push(item);
+    else if (Array.isArray(item)) out.push(String(item[0] ?? ''));
+    else out.push('');
   }
   return out;
+}
+
+async function googleTranslate(texts, source, target) {
+  const tl = normLang(target);
+  const wanted = source === 'auto' ? 'auto' : normLang(source);
+
+  // 依次尝试：主端点 → 备用主机 → 备用 client
+  const plans = [
+    ['translate.googleapis.com', 'gtx', wanted],
+    ['clients5.google.com', 'dict-chrome-ex', wanted],
+    // 指定源语言时如果"原样返回"，说明语言猜错了，再用 auto 试一次
+    ['translate.googleapis.com', 'gtx', wanted === 'auto' ? null : 'auto'],
+  ];
+
+  let last = null;
+  for (const [host, client, sl] of plans) {
+    if (!sl) continue;
+    let out;
+    try {
+      out = await googleOnce(texts, sl, tl, host, client);
+    } catch (_) {
+      continue;
+    }
+    last = out;
+    const got = out.filter((s) => s && s.trim()).length;
+    if (!got) continue; // 全空 → 换下一个方案
+    // 译文和原文完全一样，且源语言不是 auto：疑似语言猜错，继续试 auto
+    const sameAsInput =
+      sl !== 'auto' && out.every((s, i) => s === texts[i] || !s);
+    if (sameAsInput && plans.some((p) => p[2] === 'auto')) continue;
+    return out;
+  }
+
+  // 全都拿不到有效译文 → 抛错，交给 MyMemory 兜底
+  if (last && last.some((s) => s && s.trim())) return last;
+  throw new Error('google returned empty translation');
 }
 
 /** MyMemory 兜底：单条请求，有每日额度 */
@@ -198,32 +249,73 @@ async function myMemoryTranslate(text, source, target) {
 async function translateBatch(texts, source, target) {
   const engine = (await getSettings()).engine;
   if (engine === 'mymemory') {
-    const out = [];
-    for (const t of texts) {
-      try {
-        out.push(await myMemoryTranslate(t, source, target));
-      } catch (_) {
-        out.push('');
-      }
-      await new Promise((r) => setTimeout(r, 120));
-    }
-    return out;
+    return myMemoryAll(texts, source, target);
   }
-  // 默认 google，失败自动降级
+
+  // 默认 google。真实视频动辄几百句，Google 可能中途限流（429）或返回空，
+  // 所以这里做"整批 → 对半拆 → 单条兜底"的逐级降级，保证尽量每句都有译文。
+  let out = await googleChunked(texts, source, target);
+
+  // 剩下没翻出来的，用 MyMemory 逐条补（限流时这条能救回大部分）
+  const missing = [];
+  out.forEach((s, i) => {
+    if (!s || !String(s).trim()) missing.push(i);
+  });
+  if (missing.length) {
+    console.info(`[Trace bg] ${missing.length}/${texts.length} 句无译文，改用 MyMemory 兜底`);
+    const extra = await myMemoryAll(
+      missing.map((i) => texts[i]),
+      source,
+      target,
+      60 // 每批最多补 60 句，避免一次视频把额度打光
+    );
+    missing.forEach((idx, k) => {
+      if (extra[k] && extra[k].trim()) out[idx] = extra[k];
+    });
+  }
+  return out;
+}
+
+/** Google 分批翻译：整批失败就对半拆，最小到单条 */
+async function googleChunked(texts, source, target) {
+  if (!texts.length) return [];
   try {
-    return await googleTranslate(texts, source, target);
-  } catch (e) {
-    const out = [];
-    for (const t of texts) {
-      try {
-        out.push(await myMemoryTranslate(t, source, target));
-      } catch (_) {
-        out.push('');
-      }
-      await new Promise((r) => setTimeout(r, 150));
-    }
-    return out;
+    const out = await googleTranslate(texts, source, target);
+    const okCount = out.filter((s) => s && s.trim()).length;
+    // 全部翻出，或只剩极少（可能是真的没内容），直接返回
+    if (okCount >= Math.ceil(texts.length * 0.6)) return out;
+    if (texts.length === 1) return out;
+  } catch (_) {
+    if (texts.length === 1) return [''];
   }
+
+  // 对半拆开重试
+  const mid = Math.ceil(texts.length / 2);
+  const left = await googleChunked(texts.slice(0, mid), source, target);
+  await new Promise((r) => setTimeout(r, 150));
+  const right = await googleChunked(texts.slice(mid), source, target);
+  return left.concat(right);
+}
+
+/** MyMemory 逐条翻译（慢但稳），limit 控制最多翻多少条 */
+async function myMemoryAll(texts, source, target, limit = Infinity) {
+  const out = [];
+  const n = Math.min(texts.length, limit);
+  for (let i = 0; i < n; i++) {
+    let txt = '';
+    for (let attempt = 0; attempt < 2 && !txt; attempt++) {
+      try {
+        txt = await myMemoryTranslate(texts[i], source, target);
+      } catch (_) {
+        txt = '';
+      }
+      if (!txt && attempt === 0) await new Promise((r) => setTimeout(r, 300));
+    }
+    out.push(txt);
+    await new Promise((r) => setTimeout(r, 120));
+  }
+  while (out.length < texts.length) out.push('');
+  return out;
 }
 
 /** 稳定哈希（放在后台，避免通过消息传函数） */
@@ -249,7 +341,8 @@ async function translateWithCache(texts, source, target) {
   for (let i = 0; i < texts.length; i++) {
     const key = `${target}|${hashFn(texts[i])}`;
     const hit = await idbGet('translations', key);
-    if (hit && typeof hit.text === 'string') {
+    // 旧版本可能把空串写进过缓存，这类脏数据一律当作未命中，重新翻译
+    if (hit && typeof hit.text === 'string' && hit.text.trim()) {
       result[i] = hit.text;
     } else {
       missIdx.push(i);
@@ -521,6 +614,9 @@ globalThis.__traceDebug = {
   getSettings,
   translateWithCache,
   translateBatch,
+  googleTranslate,
+  googleChunked,
+  myMemoryAll,
   lookupWord,
   addWord,
   listWords,
