@@ -51,6 +51,20 @@
   transform: translateX(-50%);
 }
 
+/* 页内设置面板打开时给字幕让位。
+   面板是覆盖在播放器之上的浮层（322px 宽 + 右侧 14px），
+   长句若不收窄就会被面板从中间硬切掉一截，读起来是断的。
+   这里把可用宽度收到面板左侧，并把字幕整体左移到剩余区域的中心；
+   自由拖动模式下由 content.js 的 clampCenterX 用同一个 350px 内缩值处理。
+
+   注意 max-width 作用在**内容盒**上（.trace-sub-box 没有 border-box），
+   左右 padding 26px×2 要一起算进来，否则实际渲染宽度会多出 52px，
+   长句会从视口左边缘伸出去。 */
+#trace-sub-overlay.trace-panel-open .trace-sub-box {
+  max-width: min(calc(100vw - 374px - 52px), 1180px);
+  left: calc((100vw - 350px) / 2);
+}
+
 #trace-sub-overlay .trace-sub-box.trace-dragging {
   box-shadow: 0 16px 48px rgba(0, 0, 0, .55), 0 0 0 2px rgba(124, 141, 255, .55);
   background: rgba(38, 38, 40, .74);
@@ -348,264 +362,424 @@
 }
 
 /* ============================================================
-   页内设置面板（Trancy 风格深色侧栏）
+   页内设置面板 — 深墨 + 暖金
+   与 popup.html / wordbook.html 共用同一套设计语言（见 theme.css）：
+   墨黑分层底、发丝描边、暖金作为唯一强调色。金色直接取自字幕里
+   「已加入生词本」的高亮色，让设置面板和视频画面看起来是一套东西。
    ============================================================ */
 
 #trace-panel {
   position: fixed;
   z-index: 2147483003;
-  top: 12px;
-  right: 12px;
-  width: 306px;
-  max-height: calc(100vh - 24px);
+  top: 14px;
+  right: 14px;
+  /* 底部留出 18px：面板滚到底时最后一行不至于贴住视口边缘、阴影被裁 */
+  max-height: calc(100vh - 32px);
+  width: 322px;
   box-sizing: border-box;
   display: flex;
   flex-direction: column;
-  background: rgba(24, 24, 27, .97);
-  backdrop-filter: blur(20px) saturate(140%);
-  -webkit-backdrop-filter: blur(20px) saturate(140%);
-  color: #e9e9ec;
-  border-radius: 14px;
-  box-shadow: 0 18px 60px rgba(0, 0, 0, .6), 0 0 0 1px rgba(255, 255, 255, .07);
-  font: 13px/1.5 "Roboto", "PingFang SC", "Microsoft YaHei", sans-serif;
+  /* 右上角一团极淡的金色辉光，避免大面积纯黑显得死板 */
+  background:
+    radial-gradient(140% 100% at 100% 0%, rgba(255, 215, 110, 0.075), transparent 58%),
+    linear-gradient(180deg, #16161f 0%, #101017 58%, #0b0b10 100%);
+  color: #f6f6f8;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 18px;
+  box-shadow:
+    0 26px 72px rgba(0, 0, 0, 0.68),
+    0 2px 8px rgba(0, 0, 0, 0.38),
+    inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  font: 13px/1.55 "Segoe UI Variable Text", -apple-system, "PingFang SC",
+    "Microsoft YaHei", system-ui, sans-serif;
   overflow: hidden;
   pointer-events: auto;
-  animation: trace-panel-in .18s ease;
+  animation: trace-panel-in 0.22s cubic-bezier(0.22, 1, 0.36, 1);
 }
 #trace-panel.trace-hidden {
   display: none;
 }
 @keyframes trace-panel-in {
-  from { opacity: 0; transform: translateX(10px); }
-  to { opacity: 1; transform: none; }
+  from {
+    opacity: 0;
+    transform: translateX(12px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
 }
+
+/* ---------------------------------------------------------------- 头部 */
 
 #trace-panel .tp-head {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 12px 14px;
-  border-bottom: 1px solid rgba(255, 255, 255, .08);
+  gap: 10px;
+  padding: 14px 16px 13px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.035), transparent);
   flex: none;
 }
 #trace-panel .tp-logo {
-  width: 22px;
-  height: 22px;
-  border-radius: 6px;
-  background: linear-gradient(135deg, #4c8dff, #7c4dff);
-  color: #fff;
-  font: 700 12px/22px "Roboto", sans-serif;
+  width: 30px;
+  height: 30px;
+  border-radius: 9px;
+  background: linear-gradient(135deg, #ffd76e, #ffbe3d);
+  color: #21160a;
+  font: 800 15px/30px "Segoe UI Variable Display", system-ui, sans-serif;
   text-align: center;
   flex: none;
+  box-shadow: 0 3px 10px rgba(255, 190, 61, 0.3),
+    inset 0 1px 0 rgba(255, 255, 255, 0.5);
+}
+#trace-panel .tp-titles {
+  min-width: 0;
+  flex: 1 1 auto;
 }
 #trace-panel .tp-title {
-  font-weight: 700;
   font-size: 13.5px;
+  font-weight: 700;
+  line-height: 1.3;
+  letter-spacing: 0.01em;
+  color: #f6f6f8;
+}
+#trace-panel .tp-tag {
+  margin-top: 1px;
+  font-size: 10.5px;
+  color: #7d7d88;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 #trace-panel .tp-close {
-  margin-left: auto;
-  border: none;
-  background: transparent;
-  color: #9a9aa2;
-  font-size: 19px;
-  line-height: 1;
-  cursor: pointer;
-  padding: 0 2px;
   flex: none;
+  width: 26px;
+  height: 26px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: #7d7d88;
+  font: 400 18px/1 system-ui, sans-serif;
+  cursor: pointer;
+  display: grid;
+  place-items: center;
+  transition: color 0.15s ease, background 0.15s ease, border-color 0.15s ease;
 }
 #trace-panel .tp-close:hover {
-  color: #fff;
+  color: #f6f6f8;
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.1);
 }
 
+/* ---------------------------------------------------------------- 主体 */
+
 #trace-panel .tp-body {
-  padding: 4px 0 8px;
+  padding: 6px 0 10px;
   overflow-y: auto;
+  overscroll-behavior: contain;
   flex: 1 1 auto;
 }
 #trace-panel .tp-body::-webkit-scrollbar {
-  width: 6px;
+  width: 7px;
 }
 #trace-panel .tp-body::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, .18);
-  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.14);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: content-box;
 }
+
+/* 分区小标题（字幕 / 外观 …），字距拉开做成目录感 */
+#trace-panel .tp-sec-title {
+  padding: 12px 16px 5px;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  color: #5c5c66;
+}
+
+/* ---------------------------------------------------------------- 行 */
 
 #trace-panel .tp-row {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 9px 14px;
-  border-bottom: 1px solid rgba(255, 255, 255, .055);
+  gap: 12px;
+  padding: 9px 16px;
+  transition: background 0.14s ease;
 }
-#trace-panel .tp-row:last-child {
-  border-bottom: none;
+#trace-panel .tp-row:hover {
+  background: rgba(255, 255, 255, 0.028);
 }
 #trace-panel .tp-label {
   flex: 1 1 auto;
   min-width: 0;
-  color: #d7d7dd;
+  color: #dcdce2;
+  font-size: 12.5px;
 }
 #trace-panel .tp-sub {
   display: block;
-  color: #86868f;
-  font-size: 11px;
+  color: #6a6a75;
+  font-size: 10.5px;
   margin-top: 1px;
+  letter-spacing: 0.01em;
 }
+
+/* ---------------------------------------------------------------- 下拉 */
 
 #trace-panel select {
-  background: rgba(255, 255, 255, .08);
+  -webkit-appearance: none;
+  appearance: none;
+  flex: none;
+  max-width: 136px;
+  padding: 6px 26px 6px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  /* 自己画箭头：原生箭头在深色底上又小又灰，几乎看不见 */
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%23888894' stroke-width='1.4' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 9px center;
+  background-color: rgba(255, 255, 255, 0.05);
   color: #e9e9ec;
-  border: 1px solid rgba(255, 255, 255, .12);
-  border-radius: 7px;
-  padding: 4px 6px;
+  font: inherit;
   font-size: 12px;
-  max-width: 128px;
-  outline: none;
   cursor: pointer;
+  outline: none;
+  transition: border-color 0.15s ease, background-color 0.15s ease;
+}
+#trace-panel select:hover {
+  border-color: rgba(255, 255, 255, 0.2);
+  background-color: rgba(255, 255, 255, 0.08);
+}
+#trace-panel select:focus-visible {
+  border-color: rgba(255, 215, 110, 0.55);
+  box-shadow: 0 0 0 3px rgba(255, 215, 110, 0.12);
 }
 #trace-panel select option {
-  background: #232327;
+  background: #1a1a22;
   color: #e9e9ec;
 }
 
-/* 开关 */
+/* ---------------------------------------------------------------- 开关 */
+
 #trace-panel .tp-switch {
   position: relative;
-  width: 38px;
-  height: 21px;
+  width: 40px;
+  height: 22px;
   flex: none;
   cursor: pointer;
 }
 #trace-panel .tp-switch input {
+  position: absolute;
   opacity: 0;
   width: 0;
   height: 0;
-  position: absolute;
 }
 #trace-panel .tp-slider {
   position: absolute;
   inset: 0;
-  background: #4a4a52;
   border-radius: 999px;
-  transition: .18s;
+  background: #2a2a33;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  transition: background 0.18s ease, border-color 0.18s ease;
 }
 #trace-panel .tp-slider::before {
   content: "";
   position: absolute;
-  width: 17px;
-  height: 17px;
+  width: 16px;
+  height: 16px;
   left: 2px;
   top: 2px;
-  background: #fff;
   border-radius: 50%;
-  transition: .18s;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.45);
+  transition: transform 0.18s cubic-bezier(0.22, 1, 0.36, 1);
 }
 #trace-panel .tp-switch input:checked + .tp-slider {
-  background: #f5a623;
+  background: linear-gradient(135deg, #ffd76e, #ffbe3d);
+  border-color: transparent;
 }
 #trace-panel .tp-switch input:checked + .tp-slider::before {
-  transform: translateX(17px);
+  transform: translateX(18px);
 }
 
-/* 可折叠分组 */
+/* ---------------------------------------------------------------- 折叠分组 */
+
 #trace-panel .tp-group {
-  border-bottom: 1px solid rgba(255, 255, 255, .055);
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
 }
 #trace-panel .tp-group-head {
   display: flex;
   align-items: center;
   gap: 8px;
   width: 100%;
-  padding: 9px 14px;
+  padding: 12px 16px 9px;
   border: none;
   background: transparent;
-  color: #d7d7dd;
+  color: #8a8a95;
   font: inherit;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
   text-align: left;
   cursor: pointer;
+  transition: color 0.15s ease;
 }
 #trace-panel .tp-group-head:hover {
-  background: rgba(255, 255, 255, .04);
+  color: #c9c9d2;
 }
 #trace-panel .tp-group-head .tp-caret {
   margin-left: auto;
-  color: #86868f;
-  font-size: 11px;
-  transition: transform .16s ease;
+  font-size: 9px;
+  color: #4d4d57;
+  transition: transform 0.2s cubic-bezier(0.22, 1, 0.36, 1), color 0.15s ease;
 }
 #trace-panel .tp-group.tp-open .tp-group-head .tp-caret {
   transform: rotate(90deg);
+  color: #ffd76e;
 }
 #trace-panel .tp-group-body {
   display: none;
-  padding: 2px 14px 10px;
+  padding: 0 16px 12px;
 }
 #trace-panel .tp-group.tp-open .tp-group-body {
   display: block;
+  animation: trace-body-in 0.18s ease;
 }
+@keyframes trace-body-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+/* ---------------------------------------------------------------- 滑杆行 */
 
 #trace-panel .tp-field {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 5px 0;
+  gap: 10px;
+  padding: 7px 0;
 }
-#trace-panel .tp-field > span {
+#trace-panel .tp-field > span:first-child {
   flex: none;
-  width: 74px;
-  color: #a5a5ae;
-  font-size: 12px;
-}
-#trace-panel .tp-field input[type="range"] {
-  flex: 1 1 auto;
-  min-width: 0;
-  accent-color: #7c8dff;
+  width: 70px;
+  color: #8f8f9a;
+  font-size: 11.5px;
 }
 #trace-panel .tp-field .tp-val {
   flex: none;
-  width: 34px;
+  width: 36px;
   text-align: right;
-  color: #86868f;
-  font-size: 11.5px;
+  /* 数值用白色而非金色：金色留给可交互元素（滑杆拇指、主按钮），
+     否则一屏里七八个金色数字会和交互焦点抢注意力 */
+  color: #e6e6ec;
+  font-size: 11px;
   font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
 }
-#trace-panel .tp-field input[type="color"] {
-  flex: none;
-  width: 34px;
-  height: 24px;
-  padding: 0;
-  border: 1px solid rgba(255, 255, 255, .16);
-  border-radius: 6px;
+
+/* 原生 range 在深色面板上默认是浅蓝系统样式，自己画轨道和拇指 */
+#trace-panel .tp-field input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 18px;
   background: transparent;
   cursor: pointer;
 }
+#trace-panel .tp-field input[type="range"]::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 999px;
+  /* 未填充段要能看见，否则只看到一颗金色圆点在深底上飘 */
+  background: rgba(255, 255, 255, 0.22);
+}
+#trace-panel .tp-field input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 14px;
+  height: 14px;
+  margin-top: -5px;
+  border-radius: 50%;
+  background: #ffd76e;
+  box-shadow: 0 0 0 3px rgba(255, 215, 110, 0.14),
+    0 1px 3px rgba(0, 0, 0, 0.5);
+  transition: box-shadow 0.15s ease, transform 0.15s ease;
+}
+#trace-panel .tp-field input[type="range"]:hover::-webkit-slider-thumb {
+  box-shadow: 0 0 0 5px rgba(255, 215, 110, 0.18),
+    0 1px 3px rgba(0, 0, 0, 0.5);
+}
+#trace-panel .tp-field input[type="range"]:active::-webkit-slider-thumb {
+  transform: scale(1.08);
+}
+
+#trace-panel .tp-field input[type="color"] {
+  -webkit-appearance: none;
+  appearance: none;
+  flex: none;
+  /* 与 .tp-val 同宽，色块右缘才能和上下滑杆的数值对齐成一条线 */
+  width: 36px;
+  height: 24px;
+  margin-left: auto;
+  padding: 0;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 7px;
+  background: transparent;
+  cursor: pointer;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+#trace-panel .tp-field input[type="color"]:hover {
+  border-color: rgba(255, 255, 255, 0.32);
+  box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.06);
+}
+#trace-panel .tp-field input[type="color"]::-webkit-color-swatch-wrapper {
+  padding: 2px;
+}
+#trace-panel .tp-field input[type="color"]::-webkit-color-swatch {
+  border: none;
+  border-radius: 5px;
+}
+
+/* ---------------------------------------------------------------- 底部按钮 */
 
 #trace-panel .tp-actions {
   display: flex;
   gap: 8px;
-  padding: 10px 14px 12px;
-  border-top: 1px solid rgba(255, 255, 255, .08);
+  padding: 11px 14px 13px;
+  border-top: 1px solid rgba(255, 255, 255, 0.07);
+  background: rgba(0, 0, 0, 0.22);
   flex: none;
 }
 #trace-panel .tp-btn {
   flex: 1 1 0;
-  padding: 7px 0;
-  border: 1px solid rgba(255, 255, 255, .14);
-  border-radius: 8px;
-  background: rgba(255, 255, 255, .06);
-  color: #e9e9ec;
+  height: 33px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.05);
+  color: #dcdce2;
+  font: inherit;
   font-size: 12px;
+  font-weight: 500;
   cursor: pointer;
-  transition: background .15s ease;
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
 }
 #trace-panel .tp-btn:hover {
-  background: rgba(255, 255, 255, .13);
+  background: rgba(255, 255, 255, 0.1);
+  border-color: rgba(255, 255, 255, 0.2);
+  color: #fff;
 }
 #trace-panel .tp-btn.tp-primary {
-  background: linear-gradient(135deg, #4c8dff, #7c4dff);
   border-color: transparent;
-  font-weight: 600;
+  background: linear-gradient(135deg, #ffd76e, #ffbe3d);
+  color: #1c1305;
+  font-weight: 700;
+  box-shadow: 0 4px 14px rgba(255, 190, 61, 0.22);
 }
 #trace-panel .tp-btn.tp-primary:hover {
-  filter: brightness(1.1);
+  filter: brightness(1.06);
+  color: #1c1305;
 }

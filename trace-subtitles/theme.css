@@ -1,0 +1,544 @@
+/* ============================================================================
+   Trace — 设计系统
+   被 popup.html 与 wordbook.html 共用。
+
+   设计取向：深墨底 + 暖金强调。金色直接来自字幕里「已加入生词本」的高亮色
+   （--gold #ffd76e），让设置界面、词库看板、视频字幕三者视觉上是一套东西。
+
+   字体用系统栈而非网络字体：扩展页面离线可用、零网络请求、首屏即渲染，
+   字重与字号层级靠 scale / weight / letter-spacing 拉开，不依赖字体文件。
+   ========================================================================== */
+
+:root {
+  /* ---- 底色层级（越往上越亮）---- */
+  --ink-0: #060608;
+  --ink-1: #0b0b10;
+  --ink-2: #101017;
+  --ink-3: #16161f;
+  --ink-4: #1d1d28;
+
+  /* ---- 描边 ---- */
+  --line: rgba(255, 255, 255, 0.07);
+  --line-2: rgba(255, 255, 255, 0.11);
+  --line-3: rgba(255, 255, 255, 0.18);
+
+  /* ---- 文字 ---- */
+  --text-1: #f6f6f8;
+  --text-2: #9d9dab;
+  --text-3: #66666f;
+  --text-4: #46464e;
+
+  /* ---- 强调 ---- */
+  --gold: #ffd76e;
+  --gold-2: #ffbe3d;
+  --gold-soft: rgba(255, 215, 110, 0.13);
+  --gold-line: rgba(255, 215, 110, 0.32);
+
+  --violet: #8b7ff0;
+  --violet-soft: rgba(139, 127, 240, 0.15);
+
+  --green: #46d39a;
+  --green-soft: rgba(70, 211, 154, 0.14);
+  --amber: #f5a623;
+  --amber-soft: rgba(245, 166, 35, 0.14);
+  --slate: #7d8798;
+  --slate-soft: rgba(125, 135, 152, 0.14);
+  --danger: #f2555a;
+  --danger-soft: rgba(242, 85, 90, 0.13);
+
+  /* ---- 字体 ---- */
+  --font-display: "Segoe UI Variable Display", "SF Pro Display", -apple-system,
+    "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  --font-body: "Segoe UI Variable Text", "SF Pro Text", -apple-system,
+    "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  --font-mono: "Cascadia Mono", "SF Mono", "JetBrains Mono", ui-monospace,
+    "Consolas", monospace;
+
+  /* ---- 尺寸 ---- */
+  --r-sm: 8px;
+  --r-md: 11px;
+  --r-lg: 16px;
+  --r-xl: 22px;
+
+  --ease: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-io: cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background: var(--ink-0);
+  color: var(--text-1);
+  font-family: var(--font-body);
+  font-size: 13px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* 数字统一等宽，统计数字跳动时不抖动 */
+.num {
+  font-family: var(--font-display);
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1;
+  letter-spacing: -0.02em;
+}
+
+/* ---------------------------------------------------------------- 滚动条 */
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.2);
+  background-clip: content-box;
+}
+
+/* ---------------------------------------------------------------- 卡片 */
+
+.card {
+  background: linear-gradient(180deg, var(--ink-3) 0%, var(--ink-2) 100%);
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  position: relative;
+}
+
+/* 卡片顶部的一道极淡高光，避免纯色块看起来发死 */
+.card::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 1px;
+  border-radius: var(--r-lg) var(--r-lg) 0 0;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    rgba(255, 255, 255, 0.13),
+    transparent
+  );
+  pointer-events: none;
+}
+
+/* ---------------------------------------------------------------- 按钮 */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 8px 13px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-sm);
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text-1);
+  font-family: var(--font-body);
+  font-size: 12.5px;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.16s var(--ease-io), border-color 0.16s var(--ease-io),
+    transform 0.16s var(--ease), color 0.16s var(--ease-io);
+}
+.btn:hover {
+  background: rgba(255, 255, 255, 0.1);
+  border-color: var(--line-3);
+}
+.btn:active {
+  transform: scale(0.97);
+}
+
+.btn-primary {
+  background: linear-gradient(135deg, var(--gold) 0%, var(--gold-2) 100%);
+  border-color: transparent;
+  color: #1a1400;
+  font-weight: 650;
+}
+.btn-primary:hover {
+  background: linear-gradient(135deg, #ffdf85 0%, #ffc858 100%);
+  border-color: transparent;
+}
+
+.btn-ghost {
+  background: transparent;
+  border-color: var(--line);
+  color: var(--text-2);
+}
+.btn-ghost:hover {
+  color: var(--text-1);
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.btn-icon {
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border-radius: var(--r-sm);
+}
+
+.btn-danger:hover {
+  background: var(--danger-soft);
+  border-color: rgba(242, 85, 90, 0.4);
+  color: #ff8b8f;
+}
+
+/* ---------------------------------------------------------------- 分段控件 */
+
+.seg {
+  display: flex;
+  gap: 2px;
+  padding: 3px;
+  background: var(--ink-2);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  position: relative;
+}
+.seg button {
+  flex: 1 1 0;
+  position: relative;
+  z-index: 1;
+  padding: 6px 0;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-3);
+  font-family: var(--font-body);
+  font-size: 12.5px;
+  font-weight: 550;
+  cursor: pointer;
+  transition: color 0.18s var(--ease-io);
+}
+.seg button.on {
+  color: var(--text-1);
+}
+.seg button.on::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  border-radius: 7px;
+  background: var(--ink-4);
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.06) inset,
+    0 2px 8px rgba(0, 0, 0, 0.4);
+}
+
+/* ---------------------------------------------------------------- 胶囊标签 */
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-3);
+  font-size: 11.5px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.16s var(--ease-io);
+  white-space: nowrap;
+}
+.chip:hover {
+  color: var(--text-1);
+  border-color: var(--line-3);
+}
+.chip.on {
+  background: var(--gold-soft);
+  border-color: var(--gold-line);
+  color: var(--gold);
+}
+.chip .n {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  opacity: 0.75;
+}
+
+/* 状态胶囊 */
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+}
+.pill::before {
+  content: "";
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentColor;
+}
+.pill-new {
+  background: var(--slate-soft);
+  color: var(--slate);
+}
+.pill-learning {
+  background: var(--amber-soft);
+  color: var(--amber);
+}
+.pill-learned {
+  background: var(--green-soft);
+  color: var(--green);
+}
+
+/* ---------------------------------------------------------------- 开关 */
+
+.switch {
+  position: relative;
+  width: 38px;
+  height: 21px;
+  flex: none;
+  display: inline-block;
+}
+.switch input {
+  position: absolute;
+  opacity: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  cursor: pointer;
+  z-index: 1;
+}
+.switch .track {
+  position: absolute;
+  inset: 0;
+  border-radius: 999px;
+  background: var(--ink-4);
+  border: 1px solid var(--line-2);
+  transition: background 0.2s var(--ease-io), border-color 0.2s var(--ease-io);
+}
+.switch .track::after {
+  content: "";
+  position: absolute;
+  width: 15px;
+  height: 15px;
+  left: 2px;
+  top: 2px;
+  border-radius: 50%;
+  background: #8e8e99;
+  transition: transform 0.22s var(--ease), background 0.2s var(--ease-io);
+}
+.switch input:checked + .track {
+  background: var(--gold-soft);
+  border-color: var(--gold-line);
+}
+.switch input:checked + .track::after {
+  transform: translateX(17px);
+  background: var(--gold);
+}
+
+/* ---------------------------------------------------------------- 滑块 */
+
+input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 18px;
+  background: transparent;
+  cursor: pointer;
+  margin: 0;
+}
+input[type="range"]::-webkit-slider-runnable-track {
+  height: 3px;
+  border-radius: 999px;
+  background: var(--ink-4);
+  border: none;
+}
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 13px;
+  height: 13px;
+  margin-top: -5px;
+  border-radius: 50%;
+  background: var(--gold);
+  border: none;
+  box-shadow: 0 0 0 3px rgba(255, 215, 110, 0.12);
+  transition: box-shadow 0.16s var(--ease-io);
+}
+input[type="range"]:hover::-webkit-slider-thumb {
+  box-shadow: 0 0 0 5px rgba(255, 215, 110, 0.18);
+}
+
+input[type="color"] {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 26px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid var(--line-2);
+  border-radius: 6px;
+  background: transparent;
+  cursor: pointer;
+}
+input[type="color"]::-webkit-color-swatch-wrapper {
+  padding: 2px;
+}
+input[type="color"]::-webkit-color-swatch {
+  border: none;
+  border-radius: 4px;
+}
+
+/* ---------------------------------------------------------------- 下拉框 */
+
+.select {
+  appearance: none;
+  -webkit-appearance: none;
+  padding: 6px 26px 6px 10px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-sm);
+  background: var(--ink-3);
+  color: var(--text-1);
+  font-family: var(--font-body);
+  font-size: 12px;
+  cursor: pointer;
+  outline: none;
+  transition: border-color 0.16s var(--ease-io);
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'><path d='M1 1l4 4 4-4' stroke='%239d9dab' stroke-width='1.4' fill='none' stroke-linecap='round' stroke-linejoin='round'/></svg>");
+  background-repeat: no-repeat;
+  background-position: right 9px center;
+}
+.select:hover {
+  border-color: var(--line-3);
+}
+.select:focus {
+  border-color: var(--gold-line);
+}
+.select option {
+  background: var(--ink-2);
+  color: var(--text-1);
+}
+
+/* ---------------------------------------------------------------- 输入框 */
+
+.input {
+  padding: 7px 11px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-sm);
+  background: var(--ink-2);
+  color: var(--text-1);
+  font-family: var(--font-body);
+  font-size: 12.5px;
+  outline: none;
+  transition: border-color 0.16s var(--ease-io), background 0.16s var(--ease-io);
+}
+.input::placeholder {
+  color: var(--text-4);
+}
+.input:focus {
+  border-color: var(--gold-line);
+  background: var(--ink-3);
+}
+
+/* ---------------------------------------------------------------- 设置行 */
+
+.row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--line);
+}
+.row:last-child {
+  border-bottom: none;
+  padding-bottom: 0;
+}
+.row:first-child {
+  padding-top: 0;
+}
+.row-label {
+  font-size: 12.5px;
+  color: var(--text-1);
+  line-height: 1.35;
+}
+.row-hint {
+  font-size: 11px;
+  color: var(--text-3);
+  margin-top: 1px;
+}
+
+/* ---------------------------------------------------------------- 入场动画 */
+
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.rise {
+  animation: rise 0.42s var(--ease) both;
+}
+
+/* 交错入场：给列表项加 --i 序号即可 */
+.rise-stagger > * {
+  animation: rise 0.42s var(--ease) both;
+  animation-delay: calc(var(--i, 0) * 26ms);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}
+
+/* ---------------------------------------------------------------- 空状态 */
+
+.empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 44px 20px;
+  text-align: center;
+  color: var(--text-3);
+  font-size: 12.5px;
+}
+.empty .empty-mark {
+  width: 44px;
+  height: 44px;
+  border-radius: 13px;
+  display: grid;
+  place-items: center;
+  background: var(--ink-3);
+  border: 1px solid var(--line);
+  color: var(--text-4);
+}
+.empty .empty-title {
+  color: var(--text-2);
+  font-size: 13px;
+  font-weight: 600;
+}

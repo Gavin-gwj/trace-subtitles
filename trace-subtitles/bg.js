@@ -893,18 +893,34 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           sendResponse({ ok: true });
           break;
         case 'open-wordbook':
-          // 页内面板的「生词本」按钮：优先弹扩展 popup（需要 Chrome 127+ 且通常要用户手势）；
-          // 失败就退化成新标签页打开 popup.html —— 功能一致，只是不在角标里
+          // 页内面板的「生词本」按钮 → 词库看板（wordbook.html）。
+          // 已有看板标签页就切过去复用，避免开出一堆重复页面。
+          // 用 runtime.getContexts 而不是 tabs.query：后者按 url 过滤需要 "tabs" 权限
+          // （会触发「读取您的浏览记录」警告），getContexts 只查本扩展自己的页面，不需要。
           try {
-            await chrome.action.openPopup();
-            sendResponse({ ok: true, via: 'popup' });
-          } catch (e) {
+            const base = chrome.runtime.getURL('wordbook.html');
+            let ctxs = [];
             try {
-              await chrome.tabs.create({ url: chrome.runtime.getURL('popup.html') });
-              sendResponse({ ok: true, via: 'tab' });
-            } catch (e2) {
-              sendResponse({ ok: false, error: String((e2 && e2.message) || e2) });
+              ctxs = await chrome.runtime.getContexts({
+                contextTypes: ['TAB'],
+                documentUrls: [base],
+              });
+            } catch (_) {
+              ctxs = [];
             }
+            const hit = (ctxs || []).find((c) => c.tabId != null && c.tabId >= 0);
+            if (hit) {
+              await chrome.tabs.update(hit.tabId, { active: true });
+              if (hit.windowId != null) {
+                try { await chrome.windows.update(hit.windowId, { focused: true }); } catch (_) {}
+              }
+              sendResponse({ ok: true, via: 'focus' });
+            } else {
+              await chrome.tabs.create({ url: base });
+              sendResponse({ ok: true, via: 'tab' });
+            }
+          } catch (e) {
+            sendResponse({ ok: false, error: String((e && e.message) || e) });
           }
           break;
         default:

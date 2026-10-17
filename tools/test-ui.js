@@ -107,6 +107,29 @@ const ORIGIN = 'https://www.youtube.com';
     };
   });
 
+  // ---------------------------------------------------------- 面板不遮挡字幕
+  // 面板打开时字幕必须让位：字幕框右缘不能伸到面板左缘之下，否则长句会被硬切。
+  // 等一拍让 .trace-panel-open 的 CSS 生效并重新夹紧。
+  await page.waitForTimeout(300);
+  out.panelClearance = await page.evaluate(() => {
+    const p = document.getElementById('trace-panel');
+    const box = document.querySelector('.trace-sub-box');
+    const ov = document.getElementById('trace-sub-overlay');
+    if (!p || !box) return { ok: false, reason: 'missing nodes' };
+    const pr = p.getBoundingClientRect();
+    const br = box.getBoundingClientRect();
+    return {
+      ok: true,
+      panelLeft: Math.round(pr.left),
+      boxRight: Math.round(br.right),
+      boxLeft: Math.round(br.left),
+      boxWidth: Math.round(br.width),
+      overlapPx: Math.round(br.right - pr.left),
+      overlayHasClass: ov.classList.contains('trace-panel-open'),
+      hasOpenSubtitle: (document.querySelector('.trace-sub-orig')?.textContent || '').length > 0,
+    };
+  });
+
   // ---------------------------------------------------------- C. 样式真的生效
   // 展开「字幕样式」分组（默认已展开，稳妥点再确保一次）
   await page.evaluate(() => {
@@ -190,6 +213,12 @@ const ORIGIN = 'https://www.youtube.com';
 
   const launcherOk = out.launcher.present && out.launcher.insidePlayer;
   const panelOk = out.panelAfterClick.present && out.panelAfterClick.visible && out.panelAfterClick.hasStyleControls;
+  // 面板打开时字幕让位：不得与面板横向重叠（允许 2px 亚像素误差），
+  // 同时不能因为收窄而把左边缘推出视口（max-width 作用在内容盒上，padding 要算进来）
+  const panelClearanceOk = out.panelClearance.ok
+    && out.panelClearance.overlayHasClass
+    && out.panelClearance.overlapPx <= 2
+    && out.panelClearance.boxLeft >= 0;
 
   const sizeChanged = out.styleAfter.origFontPx === 40 && out.styleAfter.transFontPx === 30;
   const alphaChanged = out.styleAfter.varAlpha === '0.9' && out.styleAfter.boxBg.includes('0.9');
@@ -203,6 +232,7 @@ const ORIGIN = 'https://www.youtube.com';
     handle: { idle: out.handleIdle, hover: out.handleHover, afterLeave: out.handleAfterLeave },
     launcher: out.launcher,
     panel: out.panelAfterClick,
+    panelClearance: out.panelClearance,
     styleBefore: out.styleBefore,
     styleAfter: out.styleAfter,
     panelLabels: out.panelLabels,
@@ -214,6 +244,7 @@ const ORIGIN = 'https://www.youtube.com';
       handleHidesAgain,
       launcherOk,
       panelOk,
+      panelClearanceOk,
       sizeChanged,
       alphaChanged,
       radiusChanged,
@@ -224,9 +255,9 @@ const ORIGIN = 'https://www.youtube.com';
 
   const ok =
     handleHidesWhenIdle && handleShowsOnHover && handleHidesAgain &&
-    launcherOk && panelOk && sizeChanged && alphaChanged && radiusChanged &&
+    launcherOk && panelOk && panelClearanceOk && sizeChanged && alphaChanged && radiusChanged &&
     persistedOk && panelClosedOk;
-  console.log(`RESULT: ${ok ? 'PASS' : 'FAIL'}（手柄悬停显隐 + 右下角悬浮按钮 + 页内设置面板 + 字幕样式生效 + 设置持久化）`);
+  console.log(`RESULT: ${ok ? 'PASS' : 'FAIL'}（手柄悬停显隐 + 右下角悬浮按钮 + 页内设置面板不遮挡字幕 + 字幕样式生效 + 设置持久化）`);
   await ctx.close();
 })().catch((e) => {
   console.error('FATAL', e);

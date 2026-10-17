@@ -15,6 +15,9 @@
   const S = window.TraceSubs;
   const REQ = '__TRACE_REQ__';
   const RES = '__TRACE_RES__';
+  // 页内面板占用的横向空间（面板 322px + 右侧 14px 间距 + 8px 余量），
+  // 与 overlay.css 里 .trace-panel-open 的 350px 内缩值保持一致
+  const PANEL_RESERVE = 350;
   const pending = new Map();
   let reqSeq = 0;
 
@@ -171,6 +174,7 @@
     const show = force === undefined ? panelEl.classList.contains('trace-hidden') : !!force;
     panelEl.classList.toggle('trace-hidden', !show);
     if (show) syncPanelUI();
+    syncPanelLayout();
   }
 
   /** 构建页内设置面板（深色侧栏，结构对齐 Trancy 的「Trancy 字幕」菜单） */
@@ -182,10 +186,14 @@
     panelEl.innerHTML = `
       <div class="tp-head">
         <div class="tp-logo">T</div>
-        <div class="tp-title">Trace 字幕</div>
+        <div class="tp-titles">
+          <div class="tp-title">Trace 字幕</div>
+          <div class="tp-tag">双语字幕 · 点词即查 · 自动高亮生词</div>
+        </div>
         <button class="tp-close" type="button" title="关闭">×</button>
       </div>
       <div class="tp-body">
+        <div class="tp-sec-title">字幕</div>
         <div class="tp-row">
           <div class="tp-label">启用双语字幕<div class="tp-sub">在播放器上叠加译文</div></div>
           <label class="tp-switch"><input type="checkbox" data-k="enabled" /><span class="tp-slider"></span></label>
@@ -223,7 +231,7 @@
         </div>
 
         <div class="tp-row">
-          <div class="tp-label">翻译引擎</div>
+          <div class="tp-label">翻译引擎<div class="tp-sub">译文来自哪家服务</div></div>
           <select data-k="engine">
             <option value="google">Google</option>
             <option value="mymemory">MyMemory</option>
@@ -231,7 +239,7 @@
         </div>
 
         <div class="tp-row">
-          <div class="tp-label">字幕显示</div>
+          <div class="tp-label">字幕显示<div class="tp-sub">同时显示原文与译文</div></div>
           <select data-k="mode">
             <option value="bilingual">双语字幕</option>
             <option value="translation-only">仅译文</option>
@@ -255,15 +263,13 @@
               <input type="range" data-k="transSize" min="12" max="40" step="1" />
               <span class="tp-val" data-v="transSize"></span>
             </div>
-            <div class="tp-field">
+            <div class="tp-field tp-color">
               <span>原文颜色</span>
               <input type="color" data-k="origColor" />
-              <span class="tp-val"></span>
             </div>
-            <div class="tp-field">
+            <div class="tp-field tp-color">
               <span>译文颜色</span>
               <input type="color" data-k="transColor" />
-              <span class="tp-val"></span>
             </div>
             <div class="tp-field">
               <span>背景透明</span>
@@ -295,11 +301,11 @@
           </button>
           <div class="tp-group-body">
             <div class="tp-row" style="padding-left:0;padding-right:0;">
-              <div class="tp-label">点击单词查词</div>
+              <div class="tp-label">点击单词查词<div class="tp-sub">弹出释义并可直接收藏</div></div>
               <label class="tp-switch"><input type="checkbox" data-k="clickWord" /><span class="tp-slider"></span></label>
             </div>
             <div class="tp-row" style="padding-left:0;padding-right:0;">
-              <div class="tp-label">显示悬浮按钮</div>
+              <div class="tp-label">显示悬浮按钮<div class="tp-sub">播放器右下角的 T 按钮</div></div>
               <label class="tp-switch"><input type="checkbox" data-k="showLauncher" /><span class="tp-slider"></span></label>
             </div>
             <div class="tp-field">
@@ -423,9 +429,29 @@
   function clampCenterX(cx) {
     const half = (boxEl?.offsetWidth || 0) / 2;
     const min = half + 4;
-    const max = window.innerWidth - half - 4;
-    if (max < min) return window.innerWidth / 2;
+    // 面板打开时右边界要缩到面板左侧，否则字幕会被面板盖住一截
+    const rightEdge = window.innerWidth - (isPanelOpen() ? PANEL_RESERVE : 0);
+    const max = rightEdge - half - 4;
+    if (max < min) return rightEdge / 2;
     return Math.round(Math.max(min, Math.min(cx, max)));
+  }
+
+  /** 页内面板当前是否可见 */
+  function isPanelOpen() {
+    return !!panelEl && !panelEl.classList.contains('trace-hidden');
+  }
+
+  /**
+   * 面板开合时同步给覆盖层加 .trace-panel-open（CSS 里据此收窄字幕），
+   * 并重新夹紧自由模式下的中心点，避免字幕被面板压住。
+   */
+  function syncPanelLayout() {
+    if (!overlayEl) return;
+    overlayEl.classList.toggle('trace-panel-open', isPanelOpen());
+    if (state.settings?.freePos && boxEl) {
+      const cx = parseFloat(boxEl.style.left) || window.innerWidth / 2;
+      boxEl.style.left = clampCenterX(cx) + 'px';
+    }
   }
 
   /** 拖拽：按住顶部手柄移动字幕框，位置持久化（记录的是框的中心点） */

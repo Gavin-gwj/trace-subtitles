@@ -189,10 +189,12 @@ AI 总结
 | `manifest.json` | MV3 声明；两组 content_scripts（主世界 + 隔离世界）；host 权限只开 4 个域 |
 | `main-world.js` | 跑在页面主世界：读 `getPlayerResponse()` / `getOption('captions','tracklist')`，`fetch` 字幕正文，`postMessage` 桥接 |
 | `subtitles.js` | 纯函数库：`parse()`（json3/srv3）、`segment()`（智能分句）、`hash()`、`findByTime()` |
-| `content.js` | 隔离世界主控：轨道选择、批量翻译、双层字幕渲染、rAF 推进、点词、查词弹窗、生词高亮 |
+| `content.js` | 隔离世界主控：轨道选择、批量翻译、双层字幕渲染、rAF 推进、点词、查词弹窗、生词高亮、悬浮按钮与页内面板 |
 | `bg.js` | Service Worker：设置、翻译（Google + MyMemory 降级）、词典、IndexedDB 缓存与生词本 |
-| `overlay.css` | 字幕覆盖层 + 查词弹窗样式 |
-| `popup.html` / `popup.js` | 设置面板 + 生词本管理（搜索/删除/导出/跳回视频） |
+| `overlay.css` | 字幕覆盖层 + 查词弹窗 + 悬浮按钮 + 页内设置面板样式 |
+| `theme.css` | **共享设计系统**（墨黑分层底 + 暖金强调 + 字体/圆角/按钮/卡片原子类），被 popup 与词库页共用 |
+| `popup.html` / `popup.js` | 工具栏弹窗：设置 + 生词本精简列表 |
+| `wordbook.html` / `wordbook.js` | **词库看板**（独立页面）：KPI、学习状态环、每日新增柱状图、筛选/搜索/抽屉/复习/删除 |
 | `icons/` | 4 个尺寸图标（纯 Node zlib 手写 PNG 生成） |
 
 ### 三个技术要点
@@ -301,7 +303,8 @@ store），同一个视频二次打开不再请求网络。
 几个实现细节：
 
 - **哨兵选 `⟦ ⟧`（U+27E6/U+27E7）**：普通文本几乎不会出现，且实测被 Google 原样保留。
-  对比实验里 `<b>` 会被吃掉、`«»` 会被"翻译"成中文引号、`#` 会让整句不翻（`tools/probe-sentinel2.js`）。
+  对比实验里 `<b>` 会被吃掉、`«»` 会被"翻译"成中文引号、`#` 会让整句不翻（一次性探针
+  `probe-sentinel2.js` 对比了 12 种标记风格，用完即删）。
 - **索引用 `slot*2` / `slot*2+1`**：相邻两对共用编号会导致正则错配。
 - **`al2` 缓存键版本号**：对齐结果按「译文语言 + 原文 + 待高亮词集合」缓存。早期版本会把
   "标记失败退回纯译文"的降级结果也写进缓存，脏数据落库后即使引擎恢复也一直读到它 ——
@@ -313,7 +316,7 @@ store），同一个视频二次打开不再请求网络。
 - **退化路径**：若引擎把哨兵全吃掉（例如 MyMemory），`usable` 判定失败 → 退回纯译文，
   中文不高亮但至少能读，不会显示乱码。
 
-### 过程中修掉的九个真实 bug（值得记录）
+### 过程中修掉的十个真实 bug（值得记录）
 
 **bug 1：跨消息传函数。** `content.js` 曾把 `hash: S.hash` 放进 `chrome.runtime.sendMessage`，
 而消息经过结构化克隆会丢掉函数，SW 侧抛 `TypeError: hashFn is not a function`。
@@ -519,8 +522,107 @@ const looksUntranslated = (s) => !s?.zh
 // 补译 → 替换 → recomputeSpanOffsets() 重新按出现顺序算位置
 ```
 
-`tools/probe-repair.js` 覆盖三种情况（单词 / 两词 / 四词），断言
-`leftoverEnglish:false`、`allMapped:true`、`sliceOk:true`（每个 span 的切片必须严格等于 `zh`）。
+补译逻辑当时用一次性探针覆盖了三种情况（单词 / 两词 / 四词），断言
+`leftoverEnglish:false`、`allMapped:true`、`sliceOk:true`（每个 span 的切片必须严格等于 `zh`）；
+现在这条路径由 `test-zh-highlight.js` 的 `noSentinel` + 译文断言持续兜着。
+
+**bug 10：设置面板把字幕从中间切断。**
+
+现象：打开页内设置面板后，长句字幕的右半截被面板盖住（截图里英文
+`…to capture the subtitle trac…player, and then we translate each complete…each fragment.`，
+中文同样断在 `每个完整的句子，`），读起来是残句。
+
+根因：面板是 `position: fixed; right: 14px; width: 322px` 的浮层，直接叠在播放器之上；
+而字幕框是 `left: 50%; transform: translateX(-50%)` 的**全宽居中**布局 —— 两者互不知道对方存在。
+
+修复分两半，靠一个 `.trace-panel-open` 类联动：
+
+```css
+/* 面板打开：可用宽度收到面板左侧，字幕左移到剩余区域中心 */
+#trace-sub-overlay.trace-panel-open .trace-sub-box {
+  max-width: min(calc(100vw - 374px - 52px), 1180px);
+  left: calc((100vw - 350px) / 2);
+}
+```
+
+```js
+const PANEL_RESERVE = 350;   // 面板 322 + 右间距 14 + 余量 8
+function isPanelOpen() { return !!panelEl && !panelEl.classList.contains('trace-hidden'); }
+function syncPanelLayout() {
+  overlayEl.classList.toggle('trace-panel-open', isPanelOpen());
+  if (state.settings?.freePos && boxEl) {           // 自由拖动模式也要跟着夹紧
+    const cx = parseFloat(boxEl.style.left) || window.innerWidth / 2;
+    boxEl.style.left = clampCenterX(cx) + 'px';
+  }
+}
+// togglePanel() 末尾调用 syncPanelLayout()
+// clampCenterX() 的右边界改为 window.innerWidth - (isPanelOpen() ? PANEL_RESERVE : 0)
+```
+
+**踩的坑**：第一版 `max-width: calc(100vw - 374px)` 直接生效后，`test-ui.js` 新加的
+`panelClearance` 断言量出 `boxLeft: -14` —— 字幕右缘确实退到面板左边了（`overlapPx: 0`），
+但左边缘从屏幕里伸了出去。原因是 `.trace-sub-box` 没有 `box-sizing: border-box`，
+`max-width` 只约束**内容盒**，`padding: 13px 26px 15px` 的左右 52px 要另算。
+补上 `- 52px` 后实测 `boxLeft: 12, boxRight: 918, panelLeft: 944, overlapPx: -26`，
+两边都有余量。断言也补了 `boxLeft >= 0`，防止这个溢出回归。
+
+### 界面重设计：从"能用"到"像产品"
+
+复刻完功能后，界面做了两轮视觉重构。核心决定是**放弃"每个页面各写一套 CSS"**，先抽出一套
+共享设计系统 `theme.css`，再让三处界面（工具栏弹窗、词库看板、页内面板）共用同一套色板与原子类。
+
+**设计语言**：深墨底 + 暖金强调。
+
+- 金色直接取自字幕里「已加入生词本」的高亮色（`#ffd76e`）—— 设置界面、词库看板、视频画面
+  三者在视觉上是一套东西，而不是拼装起来的三个工具。
+- 底色是**五级墨黑**（`--ink-0` 到 `--ink-4`），靠层级而非描边区分区块；描边只用
+  `rgba(255,255,255,.07)` 这种发丝线，避免深色界面上出现"一堆灰框"。
+- 字体用系统栈而非网络字体：扩展页面要**离线可用、零网络请求、首屏即渲染**，
+  层级靠字号 / 字重 / 字距拉开，不依赖字体文件。
+
+**词库看板**（`wordbook.html`）不是把 popup 拉长，而是按"数据产品"重新设计：
+
+| 区域 | 内容 |
+|---|---|
+| 顶部 KPI | 总词数、今日新增、连续天数、待复习 |
+| 学习状态环 | 新词 / 记忆中 / 已记住 三段环形图（SVG `stroke-dasharray`） |
+| 每日新增柱状图 | 支持日 / 周 / 月三种粒度，纵轴刻度用 `niceScale()` 取整 |
+| 单词表 | 单词、释义、状态徽章、来源视频、加入时间、操作列 |
+| 抽屉 | 点行展开：所在句子、译文、跳回视频按钮、复习 / 删除 |
+
+**纵轴刻度**这个细节值得单独说：早期直接取 `max/3`、`2max/3`，数据量小时会出现
+`1、3、4` 这种不等距刻度，读起来莫名其妙。改成先把上限向上取整到"好步长"（1/2/5/10…）的
+整数倍，再等距出刻度：
+
+```js
+function niceScale(raw) {
+  const target = Math.max(1, raw) * 1.15;
+  let step;
+  if (target <= 4) step = 1;
+  else if (target <= 10) step = 2;
+  else if (target <= 25) step = 5;
+  else step = Math.ceil(target / 5 / 5) * 5;
+  const max = Math.max(step, Math.ceil(target / step) * step);
+  const ticks = [];
+  for (let v = step; v <= max; v += step) ticks.push(v);
+  return { max, ticks };
+}
+```
+
+**页内面板**的视觉也对齐了这套语言（原来是 Trancy 风格的深灰 + 蓝紫，现在是墨黑 + 暖金）：
+
+- 头部：金色渐变的 T 徽标 + 主标题 + 一行副标题（"双语字幕 · 点词即查 · 自动高亮生词"）
+- 分区小标题（`字幕` / `字幕样式` / `更多功能`）用 10.5px + `letter-spacing: .1em` 做目录感
+- 开关、滑杆、下拉全部自己画（原生控件在深色面板上是浅蓝系统样式，格格不入）
+- 滑杆拇指金色、数值白色 —— **金色只留给可交互元素**，否则一屏七八个金色数字会和交互焦点抢注意力
+
+**页内面板重设计时踩的两个排版坑**（靠像素级探针量 `getBoundingClientRect()` 才确认，
+探针用完即删）：
+
+1. 颜色选择器的色块（`input[type=color]`）没有 `margin-left: auto`，会紧跟标签靠左，
+   右缘和上下滑杆的数值列对不齐，整块面板的右对齐网格就断了。
+2. 数值列宽度不固定时，`55%` 和 `28` 混排会让右缘左右微抖；给 `.tp-val` 固定
+   `width: 36px` + `text-align: right` 后，所有控件右缘落在同一条线上。
 
 ---
 
@@ -555,6 +657,8 @@ const looksUntranslated = (s) => !s?.zh
 - **点击查词**：点字幕里任意单词 → 音标 + 中文释义 + 英文释义 + 例句
 - **生词本**：一键加入，记录单词/释义/**所在句子与译文**/视频标题/时间点，可搜索、删除、
   导出 JSON，点击条目跳回原视频那一秒
+- **词库看板**（独立页面）：KPI 概览、学习状态环、每日新增柱状图（日/周/月）、状态筛选、
+  搜索、单词抽屉（所在句子 + 跳回视频）、复习与删除 —— 数据全在本机，离线可用
 - **生词高亮（跨视频生效）**：任何已加入生词本的单词，在**所有** YouTube 视频的字幕里都会
   自动高亮（黄色底色 + 下划线），不需要重新加入
 - **译文对应词也高亮**：不只是英文原文，**中文译文里对应的那几个字**同样会高亮
@@ -579,6 +683,7 @@ node test-pot.js             # pot 签名回归测试 + 截图 shot-pot.png
 node test-center.js          # 拖动后按中心点定位（长短句不左右跳）+ 截图 shot-center.png
 node test-ui.js              # 手柄悬停显隐 + 悬浮按钮 + 页内面板 + 字幕样式，截图 shot-ui*.png
 node test-zh-highlight.js    # 译文里对应中文也高亮（多词 / 点击 / 移除），截图 shot-zh-highlight.png
+node test-wordbook.js        # 词库看板：KPI/状态环/柱状图/筛选/搜索/抽屉/复习/删除/粒度切换
 ```
 
 `tools/mock/` 用 Playwright `page.route()` 整体伪造 `https://www.youtube.com/**`，
@@ -634,7 +739,8 @@ handle:   idle {opacity:0, visibility:hidden, pointerEvents:none}
           hover{opacity:1, visibility:visible, pointerEvents:auto}
           afterLeave {opacity:0}
 launcher: {present:true, rect:{x:1234,y:848,w:34,h:34}, player:{right:1280,bottom:900}, insidePlayer:true}
-panel:    {visible:true, w:306, groups:["字幕样式","更多功能"], hasStyleControls:true}
+panel:    {visible:true, w:322, groups:["字幕样式","更多功能"], hasStyleControls:true}
+clearance:{panelLeft:944, boxLeft:12, boxRight:918, overlapPx:-26, overlayHasClass:true}  ← 面板不遮挡字幕
 style:    before {origFontPx:28, transFontPx:21, boxRadius:"12px", boxBg:"rgba(38,38,40,0.55)"}
           after  {origFontPx:40, transFontPx:30, boxRadius:"24px", boxBg:"rgba(38,38,40,0.9)"}
 persisted:{origSize:40, transSize:30, bgAlpha:0.9, radius:24}
@@ -655,6 +761,24 @@ checks: {zhPresent:true, noSentinel:true, styled:true, cyan:true, clickOpens:tru
 RESULT: PASS
 ```
 
+词库看板回归（KPI / 状态环 / 柱状图 / 筛选 / 搜索 / 抽屉 / 复习 / 删除 / 粒度切换）：
+
+```
+seeded: 8 个词（pipeline / subtitle / overlay / translate / segment / caption / bilingual / highlight）
+first:  {kTotal:8, kLearned:2, kLearning:2, kToday:3, rows:8,
+         barCount:30, barFilled:3, donutBg:true, donutNum:8, legendRows:3,
+         subLine:"共 8 个单词 · 已记住 2 · 记忆中 2 · 今天新增 3",
+         chartSub:"最近 30 天 · 共 7 词 · 另有 1 词更早"}
+filter: learnedView {rows:2, words:["caption","highlight"]}
+search: {rows:1, words:["translate"]}
+drawer: {open:true, word:"pipeline", phon:"/ˈpaɪplaɪn/", hasQuote:true, hasEm:true, playEnabled:true}
+review: {kLearning:3, pill:"记忆中", drawerOpen:true}
+gran:   day {bars:30} → week {bars:12} → month {bars:12}
+delete: {kTotal:7, rows:7, deleteDelta:1}
+checks: firstOk barFilledOk kpiOk learnedOk searchOk chipOk drawerOk reviewOk granOk deleteOk noErrors 全 true
+RESULT: PASS（词库看板：KPI/状态环/柱状图/筛选/搜索/抽屉/复习/删除/粒度切换）
+```
+
 ---
 
 ## 四、目录结构
@@ -666,10 +790,12 @@ D:\MyFiles\项目\Trace\
 │  ├─ manifest.json
 │  ├─ main-world.js             主世界：读播放器 / 网络钩子 / 抓字幕（五级降级）
 │  ├─ subtitles.js              解析 + 智能分句
-│  ├─ content.js                渲染 / 交互 / DOM 兜底
+│  ├─ content.js                渲染 / 交互 / 页内面板 / DOM 兜底
 │  ├─ bg.js                     SW：翻译 / 词典 / IndexedDB
-│  ├─ overlay.css
-│  ├─ popup.html / popup.js
+│  ├─ overlay.css               字幕 / 查词卡 / 悬浮按钮 / 页内面板
+│  ├─ theme.css                 共享设计系统（墨黑 + 暖金）
+│  ├─ popup.html / popup.js     工具栏弹窗
+│  ├─ wordbook.html / wordbook.js  词库看板
 │  └─ icons\
 └─ tools\                       ← 逆向与验证工具（非扩展的一部分）
    ├─ mock\fixtures.js          测试夹具（假播放器 + 13 条碎片字幕 + pot 模式）
@@ -679,10 +805,9 @@ D:\MyFiles\项目\Trace\
    ├─ test-center.js            拖动后中心点定位回归测试
    ├─ test-ui.js                手柄显隐 + 悬浮按钮 + 页内面板 + 字幕样式回归测试
    ├─ test-zh-highlight.js      译文里对应中文高亮回归测试（多词/点击/移除）
+   ├─ test-wordbook.js          词库看板回归测试（KPI/图表/筛选/抽屉/复习）
    ├─ probe-ext2\               主世界 vs 隔离世界对照实验
    ├─ probe-transcript.js       get_transcript 接口探针
-   ├─ probe-sentinel2.js        12 种哨兵标记风格对比（选 ⟦⟧ 的依据）
-   ├─ probe-repair.js           哨兵内词未翻译时的补译修复验证
    ├─ gen-icons.js              纯 Node 生成 PNG 图标
    ├─ shot-mock.png             验证截图（高亮 + 查词卡）
    ├─ shot-pot.png              pot 模式验证截图
@@ -690,6 +815,8 @@ D:\MyFiles\项目\Trace\
    ├─ shot-ui.png               悬浮按钮 + 放大字号截图
    ├─ shot-ui-panel.png         页内设置面板展开截图
    ├─ shot-zh-highlight.png     译文中文高亮截图
+   ├─ shot-wordbook.png         词库看板截图
+   ├─ shot-wordbook-drawer.png  词库看板单词抽屉截图
    └─ shot-glass.png            毛玻璃 + 3 点拖动胶囊截图
 ```
 
