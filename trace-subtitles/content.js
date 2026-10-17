@@ -94,6 +94,8 @@
     handleEl = overlayEl.querySelector('.trace-drag-handle');
 
     origEl.addEventListener('click', onWordClick);
+    // 译文里高亮的中文也能点：直接打开同一个生词卡片
+    transEl.addEventListener('click', onWordClick);
     initDrag();
   }
 
@@ -549,13 +551,68 @@
     }
     overlayEl.classList.remove('trace-empty');
     origEl.innerHTML = renderWords(sentence.text);
-    transEl.textContent = sentence.zh || '';
+    renderTranslation(sentence);
     transEl.classList.toggle('trace-loading', !sentence.zh && state.translating);
+    // 这句里有生词、但当前译文还没有对齐位置（例如先翻完才加的词）→ 补一次对齐
+    if (sentence.zh && !sentence.zhSpans?.length && !sentence.zhAlignTried) {
+      const saved = collectSavedWords(sentence.text);
+      if (saved && saved.size) {
+        sentence.zhAlignTried = true;
+        realignActive();
+      }
+    }
     // 句子变长/变短后框宽会变，自由模式下重新夹紧中心点，避免贴边溢出
     if (state.settings?.freePos) {
       const cx = parseFloat(boxEl?.style.left) || window.innerWidth / 2;
       if (boxEl) boxEl.style.left = clampCenterX(cx) + 'px';
     }
+  }
+
+  /**
+   * 渲染译文。若后台给了生词在译文里的位置（sentence.zhSpans），
+   * 就把对应中文片段包成 .trace-saved-zh 高亮出来。
+   *
+   * 位置来自「带哨兵翻译」：把英文生词用 ⟦n⟧ 包起来送 Google，
+   * 中文对应词会落在哨兵之间（原理与实测见 bg.js 的 translateAligned）。
+   */
+  function renderTranslation(sentence) {
+    const zh = sentence.zh || '';
+    const spans = Array.isArray(sentence.zhSpans) ? sentence.zhSpans : [];
+    if (!zh || !spans.length) {
+      transEl.textContent = zh;
+      return;
+    }
+    // 按位置排序并剔除越界/重叠项，然后切片拼接
+    const valid = spans
+      .filter((s) => Number.isInteger(s.start) && Number.isInteger(s.end) && s.start >= 0 && s.end > s.start && s.end <= zh.length)
+      .sort((a, b) => a.start - b.start);
+    if (!valid.length) {
+      transEl.textContent = zh;
+      return;
+    }
+    let html = '';
+    let cursor = 0;
+    for (const s of valid) {
+      if (s.start < cursor) continue; // 与上一段重叠，跳过
+      html += escapeHtml(zh.slice(cursor, s.start));
+      html += `<span class="trace-saved-zh" data-w="${escapeAttr(s.word)}">${escapeHtml(zh.slice(s.start, s.end))}</span>`;
+      cursor = s.end;
+    }
+    html += escapeHtml(zh.slice(cursor));
+    transEl.innerHTML = html;
+  }
+
+  /** 这句话里哪些词是生词（小写集合），用于后台打标记 */
+  function collectSavedWords(text) {
+    if (!state.wordSet || !state.wordSet.size) return null;
+    const found = new Set();
+    const re = /[A-Za-z][A-Za-z'’-]*/g;
+    let m;
+    while ((m = re.exec(text))) {
+      const w = m[0].toLowerCase();
+      if (state.wordSet.has(w)) found.add(w);
+    }
+    return found.size ? found : null;
   }
 
   /** 把原文拆成可点击的单词 span，保留标点；已加入生词本的单词额外加 trace-saved */
@@ -763,24 +820,28 @@
     });
   }
 
-  /** 翻译一小批句子，失败自动重试一次 */
+  /** 翻译一小批句子，失败自动重试一次；同时取回生词在译文中的位置 */
   async function translateChunk(chunk, texts, target, gen) {
     // 源语言用轨道声明的语言；轨道没给就交给后台 auto 探测
     const source = state.track?.languageCode || 'auto';
+    // 每句带上"这句话里哪些词是生词"，后台据此打标记做译文对齐
+    const wordSets = texts.map((t) => collectSavedWords(t));
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
         const out = await sendMsg({
-          type: 'translate',
+          type: 'translate:aligned',
           texts,
+          wordSets: wordSets.map((s) => (s ? [...s] : [])),
           source,
           target,
         }, 30000);
         if (gen != null && gen !== translateGen) return; // 结果过期，丢弃
-        if (out && out.ok && Array.isArray(out.data)) {
+        if (out && out.ok && out.data && Array.isArray(out.data.texts)) {
           let filled = 0;
-          out.data.forEach((zh, j) => {
+          out.data.texts.forEach((zh, j) => {
             if (zh && String(zh).trim() && chunk[j]) {
               chunk[j].zh = zh;
+              chunk[j].zhSpans = out.data.spans?.[j] || [];
               filled++;
             }
           });
@@ -960,7 +1021,9 @@
 
   async function onWordClick(ev) {
     if (!state.settings?.clickWord) return;
-    const el = ev.target.closest('.trace-word');
+    // 英文词（.trace-word）和译文里高亮的中文（.trace-saved-zh）都能点，
+    // 两者都带 data-w = 英文原词，所以打开的是同一张生词卡。
+    const el = ev.target.closest('.trace-word, .trace-saved-zh');
     if (!el) return;
     const word = el.dataset.w;
     if (!word) return;
@@ -1063,9 +1126,48 @@
 
   // ------------------------------------------------------------ 生词高亮
 
-  /** 重新渲染当前这一句，让新增/移除的生词高亮立刻生效 */
+  /**
+   * 重新渲染当前这一句，让新增/移除的生词高亮立刻生效。
+   *
+   * 英文侧是本地重渲染（立刻见效）；中文侧的位置需要重新对齐，
+   * 所以这里先按旧位置渲染一次，再异步请求对齐后补上。
+   */
   function refreshActiveWords() {
-    if (state.active && overlayEl) origEl.innerHTML = renderWords(state.active.text);
+    if (!state.active || !overlayEl) return;
+    origEl.innerHTML = renderWords(state.active.text);
+    // 中文高亮依赖译文对齐位置，词表变了必须重新要一次
+    realignActive();
+  }
+
+  /** 针对当前句重新请求一次带对齐的翻译，只更新这一句 */
+  let alignGen = 0;
+  async function realignActive() {
+    const sentence = state.active;
+    if (!sentence || !sentence.zh) return;
+    const gen = ++alignGen;
+    try {
+      const out = await sendMsg({
+        type: 'translate:aligned',
+        texts: [sentence.text],
+        wordSets: [(() => {
+          const s = collectSavedWords(sentence.text);
+          return s ? [...s] : [];
+        })()],
+        source: state.track?.languageCode || 'auto',
+        target: state.settings?.targetLang || 'zh-CN',
+      }, 20000);
+      if (gen !== alignGen) return;
+      if (out && out.ok && out.data && Array.isArray(out.data.texts)) {
+        const zh = out.data.texts[0];
+        if (zh && zh.trim()) {
+          sentence.zh = zh;
+          sentence.zhSpans = out.data.spans?.[0] || [];
+          if (state.active === sentence) renderTranslation(sentence);
+        }
+      }
+    } catch (_) {
+      /* 对齐失败不影响字幕本身 */
+    }
   }
 
   /** 从后台拉取生词表，更新高亮集合 */
@@ -1083,7 +1185,7 @@
 
   document.addEventListener('click', (e) => {
     if (popupEl && !popupEl.classList.contains('trace-hidden')) {
-      if (!popupEl.contains(e.target) && !e.target.closest('.trace-word')) hidePopup();
+      if (!popupEl.contains(e.target) && !e.target.closest('.trace-word, .trace-saved-zh')) hidePopup();
     }
   });
 

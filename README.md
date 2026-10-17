@@ -282,7 +282,38 @@ store），同一个视频二次打开不再请求网络。
 - **广播不需要 `tabs` 权限**：`host_permissions` 已含 `youtube.com`，`chrome.tabs.query({url})`
   可以直接按 URL 过滤；申请 `tabs` 权限反而会触发"读取浏览记录"的安装警告。
 
-### 过程中修掉的六个真实 bug（值得记录）
+**⑤ 译文里对应词也高亮：哨兵对齐**
+
+难点：英文 `word` 在中文里可能译成"单词"、"字"、"词"，**没法靠词典反查位置**。
+解法是把对齐问题变成"让翻译引擎自己告诉我位置"：
+
+```
+原文：  Click any word to look it up and save it to your wordbook.
+标记：  Click any ⟦0⟧word⟦1⟧ to look it up and save it to your ⟦2⟧wordbook⟦3⟧.
+送翻：  POST /translate_a/t  （一次请求，不额外花钱）
+译文：  单击任意⟦0⟧单词⟦1⟧进行查找并将其保存到您的⟦2⟧单词本⟦3⟧。
+        ↓ 哨兵之间的内容就是这个词在这句里的译法，位置也直接拿到了
+解析：  word→单词[4,6]   wordbook→单词本[18,21]
+清洗：  单击任意单词进行查找并将其保存到您的单词本。   ← 哨兵全部移除
+渲染：  把 [4,6) 和 [18,21) 两个切片包成 <span class="trace-saved-zh">
+```
+
+几个实现细节：
+
+- **哨兵选 `⟦ ⟧`（U+27E6/U+27E7）**：普通文本几乎不会出现，且实测被 Google 原样保留。
+  对比实验里 `<b>` 会被吃掉、`«»` 会被"翻译"成中文引号、`#` 会让整句不翻（`tools/probe-sentinel2.js`）。
+- **索引用 `slot*2` / `slot*2+1`**：相邻两对共用编号会导致正则错配。
+- **`al2` 缓存键版本号**：对齐结果按「译文语言 + 原文 + 待高亮词集合」缓存。早期版本会把
+  "标记失败退回纯译文"的降级结果也写进缓存，脏数据落库后即使引擎恢复也一直读到它 ——
+  现在降级结果**不写缓存**，并把键前缀升到 `al2` 整体绕过历史脏数据。
+- **兜底补译**（`repairUntranslatedSlots`）：Google 偶尔会把标记内的词**原样保留**不翻译
+  （实测 `…save it to your ⟦0⟧wordbook⟦1⟧.` 直接返回英文 `wordbook`，但同一个词单独送翻
+  又是正常的 —— 属于上下文依赖的不稳定行为）。此时对这些槽位单独补译一次，再在译文里
+  就地替换残留英文并重算 span 偏移，保证译文永远是纯中文。
+- **退化路径**：若引擎把哨兵全吃掉（例如 MyMemory），`usable` 判定失败 → 退回纯译文，
+  中文不高亮但至少能读，不会显示乱码。
+
+### 过程中修掉的九个真实 bug（值得记录）
 
 **bug 1：跨消息传函数。** `content.js` 曾把 `hash: S.hash` 放进 `chrome.runtime.sendMessage`，
 而消息经过结构化克隆会丢掉函数，SW 侧抛 `TypeError: hashFn is not a function`。
@@ -434,6 +465,63 @@ CSS 侧对应 `.trace-sub-box:hover` 之外再加 `#trace-sub-overlay.trace-hot`
 > 这里也有个测试时序坑：类名在 320ms 移除，但 `opacity .16s` 过渡还要 160ms，
 > 采样点必须 ≥800ms 才拿到终态；早期用 400ms 采样读到中间值导致误报 FAIL。
 
+**bug 7：对齐链"整条静默失效"—— `Set` 过不了消息通道。**
+
+现象：中文高亮完全不出现，但英文高亮正常，日志里也没有任何报错。
+
+根因：`markWords(text, wordSet)` 里判的是 `wordSet.size`，而词集合是**通过
+`chrome.runtime.sendMessage` 传进 SW 的** —— 结构化克隆把 `Set` 序列化成 `{}`，
+`size` 变 `undefined`，函数直接 `return { marked: text, slots: [] }` 提前退出。
+整条对齐链失效且**不抛错**，所以最难查。
+
+修复：`markWords` 同时接受 `Set` 与数组，数组先 `new Set(...)` 归一化：
+
+```js
+const set = wordSet instanceof Set ? wordSet
+          : Array.isArray(wordSet) ? new Set(wordSet.map(w => String(w).toLowerCase()))
+          : null;
+```
+
+教训：跨消息传递的数据结构只能是 JSON 原生类型（数组/对象/字符串/数字），
+`Set`/`Map`/`Date`/函数都不保证，且失败往往是静默的。
+
+**bug 8：降级结果写进缓存，把好数据永久盖住。**
+
+现象：移除一个生词后，译文里剩下的那个词变成英文 —— "…保存到您的 `wordbook`。"
+
+排查过程：先怀疑哨兵导致不翻译，做了 `probe-sentinel.js`（发现 `⟦0⟧wordbook⟦1⟧`
+确实原样返回）→ 又做 `probe-sentinel2.js` 对比 12 种标记风格（`⟦⟧`/`【】`/`<>`/`{{}}`/
+`[[]]`/`«»`/`<b>`/零宽空格/`~`/LRM），结果 `⟦⟧` 在所有句子里都正常工作
+→ 说明不是标记本身的问题，而是**读到了旧结果**。
+
+根因：`translateAligned` 在"引擎吃掉了哨兵"的降级分支里，把 `spans: []` 的纯译文
+**也写进了缓存**。之后即使引擎恢复正常，同样的（译文语言 + 原文 + 词集合）也只会命中
+这条脏记录，永远修不好。
+
+修复：降级结果**不写缓存**，并把缓存键前缀从 `al|` 升到 `al2|`，让历史脏数据整体失效。
+
+**bug 9：Google 偶尔"把标记内的词原样保留"。**
+
+现象：`…save it to your ⟦0⟧wordbook⟦1⟧.` 返回 `…保存到您的⟦0⟧wordbook⟦1⟧。` ——
+哨兵保留了，但里面的词没翻。而把同一个词放进别的句子（`Please save the ⟦0⟧wordbook⟦1⟧
+for me.` → `请帮我保存⟦0⟧单词书⟦1⟧。`）又是正常的。
+
+结论：这是 Google 的上下文依赖行为，**不可控**，只能兜底。
+
+修复：`repairUntranslatedSlots()` —— 检测哪些 span 的译文里没有中文（或仍含英文原词），
+把这些词**单独再翻一次**，然后在译文里就地替换残留英文并重算 span 偏移：
+
+```js
+const looksUntranslated = (s) => !s?.zh
+  || !/[\u4e00-\u9fff]/.test(s.zh)                              // 没有中文
+  || new RegExp(`(^|[^A-Za-z])${escapeRe(s.word)}([^A-Za-z]|$)`, 'i').test(s.zh); // 混着英文
+
+// 补译 → 替换 → recomputeSpanOffsets() 重新按出现顺序算位置
+```
+
+`tools/probe-repair.js` 覆盖三种情况（单词 / 两词 / 四词），断言
+`leftoverEnglish:false`、`allMapped:true`、`sliceOk:true`（每个 span 的切片必须严格等于 `zh`）。
+
 ---
 
 ## 三、安装与使用
@@ -469,6 +557,8 @@ CSS 侧对应 `.trace-sub-box:hover` 之外再加 `#trace-sub-overlay.trace-hot`
   导出 JSON，点击条目跳回原视频那一秒
 - **生词高亮（跨视频生效）**：任何已加入生词本的单词，在**所有** YouTube 视频的字幕里都会
   自动高亮（黄色底色 + 下划线），不需要重新加入
+- **译文对应词也高亮**：不只是英文原文，**中文译文里对应的那几个字**同样会高亮
+  （青色 + 斜体 + 虚线下划线），一眼就能看出这个词在这句话里被译成了什么
 - **状态记忆**：再次点击已加入的词，弹窗按钮显示「✓ 已在生词本」，点一下即可移除
 
 ### 离线验证（不需要登录 YouTube）
@@ -488,6 +578,7 @@ node test-mock.js            # 基础链路 + 查词 + 生词本 + 高亮，输�
 node test-pot.js             # pot 签名回归测试 + 截图 shot-pot.png
 node test-center.js          # 拖动后按中心点定位（长短句不左右跳）+ 截图 shot-center.png
 node test-ui.js              # 手柄悬停显隐 + 悬浮按钮 + 页内面板 + 字幕样式，截图 shot-ui*.png
+node test-zh-highlight.js    # 译文里对应中文也高亮（多词 / 点击 / 移除），截图 shot-zh-highlight.png
 ```
 
 `tools/mock/` 用 Playwright `page.route()` 整体伪造 `https://www.youtube.com/**`，
@@ -550,6 +641,20 @@ persisted:{origSize:40, transSize:30, bgAlpha:0.9, radius:24}
 RESULT: PASS
 ```
 
+中文高亮回归（译文里对应词也高亮）：
+
+```
+target sentence: {"orig":"Click any word to look it up and save it to your wordbook.",
+                  "trans":"单击任意单词即可查找并将其保存到您的单词簿中。"}
+zh highlight: {count:2, words:["word","wordbook"], zhTexts:["单词","单词本"],
+               hasSentinel:false, italic:true, underline:true, dash:"dashed",
+               color:"rgb(127, 227, 212)"}
+click zh span: {present:true, word:"word", btnAct:"remove"}
+after remove:  {zhCount:1, enCount:1, trans:"单击任意单词即可查找并将其保存到您的wordbook。"}
+checks: {zhPresent:true, noSentinel:true, styled:true, cyan:true, clickOpens:true, removed:true}
+RESULT: PASS
+```
+
 ---
 
 ## 四、目录结构
@@ -573,14 +678,18 @@ D:\MyFiles\项目\Trace\
    ├─ test-pot.js               pot 签名回归测试
    ├─ test-center.js            拖动后中心点定位回归测试
    ├─ test-ui.js                手柄显隐 + 悬浮按钮 + 页内面板 + 字幕样式回归测试
+   ├─ test-zh-highlight.js      译文里对应中文高亮回归测试（多词/点击/移除）
    ├─ probe-ext2\               主世界 vs 隔离世界对照实验
    ├─ probe-transcript.js       get_transcript 接口探针
+   ├─ probe-sentinel2.js        12 种哨兵标记风格对比（选 ⟦⟧ 的依据）
+   ├─ probe-repair.js           哨兵内词未翻译时的补译修复验证
    ├─ gen-icons.js              纯 Node 生成 PNG 图标
    ├─ shot-mock.png             验证截图（高亮 + 查词卡）
    ├─ shot-pot.png              pot 模式验证截图
    ├─ shot-center.png           居中验证截图
    ├─ shot-ui.png               悬浮按钮 + 放大字号截图
    ├─ shot-ui-panel.png         页内设置面板展开截图
+   ├─ shot-zh-highlight.png     译文中文高亮截图
    └─ shot-glass.png            毛玻璃 + 3 点拖动胶囊截图
 ```
 

@@ -327,6 +327,288 @@ async function myMemoryAll(texts, source, target, limit = Infinity) {
   return out;
 }
 
+// ------------------------------------------------- 译文对齐（生词中文高亮）
+//
+// 问题：生词本里的单词，英文那边能高亮（我们自己拆词就知道位置），
+// 但中文译文是 Google 整句翻出来的，根本不知道"today"对应"今天"落在哪个字。
+//
+// 解法：把待高亮的英文词用哨兵包起来再送翻译，Google 会原样保留哨兵，
+// 中文对应词就夹在两个哨兵之间。实测（tools/probe-align3.js）：
+//   Click any ⟦0⟧word⟦1⟧ ... and ⟦2⟧save⟦3⟧ it to your ⟦4⟧wordbook⟦5⟧.
+//   → 单击任意⟦0⟧单词⟦1⟧进行查找，然后⟦2⟧将⟦3⟧保存到您的⟦4⟧单词本⟦5⟧。
+// 12 个词全标记也 12/12 命中，词形变化（capturing→捕捉、translated→翻译了）同样有效。
+//
+// 哨兵选 ⟦ ⟧（U+27E6/U+27E7）：普通文本几乎不可能出现，且实测被保留。
+// 索引用 slot*2 / slot*2+1，避免相邻两对共用编号导致正则错配。
+
+const SENT_A = '\u27E6';
+const SENT_B = '\u27E7';
+const SENT_RE = new RegExp(`[${SENT_A}${SENT_B}]`, 'g');
+
+/** 把 text 里出现在 wordSet 中的单词包上哨兵，返回 {marked, slots} */
+function markWords(text, wordSet) {
+  // wordSet 可能是 Set，也可能是从消息里传来的数组（JSON 不支持 Set）。
+  // 早期只判 .size，数组的 size 是 undefined 会直接跳过标记，导致整条对齐链静默失效。
+  const set =
+    wordSet instanceof Set
+      ? wordSet
+      : Array.isArray(wordSet)
+      ? new Set(wordSet.map((w) => String(w).toLowerCase()))
+      : null;
+  const slots = [];
+  if (!set || !set.size) return { marked: text, slots };
+  const hits = [];
+  const re = /[A-Za-z][A-Za-z'’-]*/g;
+  let m;
+  while ((m = re.exec(text))) {
+    if (set.has(m[0].toLowerCase())) {
+      hits.push({ start: m.index, end: m.index + m[0].length, word: m[0] });
+    }
+  }
+  if (!hits.length) return { marked: text, slots };
+
+  let out = '';
+  let i = 0;
+  for (const h of hits) {
+    out += text.slice(i, h.start);
+    const idx = slots.length * 2;
+    out += `${SENT_A}${idx}${SENT_B}${text.slice(h.start, h.end)}${SENT_A}${idx + 1}${SENT_B}`;
+    slots.push({ word: h.word.toLowerCase(), start: h.start });
+    i = h.end;
+  }
+  out += text.slice(i);
+  return { marked: out, slots };
+}
+
+/** 从带哨兵的译文里抽出每个 slot 的中文，并给出清洗后的纯译文 */
+function parseMarked(out, slots) {
+  const spans = [];
+  for (const s of slots) {
+    const idx = spans.length * 2;
+    const re = new RegExp(`${SENT_A}${idx}${SENT_B}([\\s\\S]*?)${SENT_A}${idx + 1}${SENT_B}`);
+    const m = out.match(re);
+    if (m && m[1] && m[1].trim()) {
+      spans.push({ word: s.word, zh: m[1].trim(), start: m.index, end: m.index + m[0].length });
+    } else {
+      spans.push({ word: s.word, zh: null, start: -1, end: -1 });
+    }
+  }
+  const clean = out.replace(new RegExp(`${SENT_A}\\d+${SENT_B}`, 'g'), '');
+  return { clean, spans };
+}
+
+/** 把带哨兵的句子翻成译文 + 词对齐位置；引擎不支持标记时优雅退化为纯译文 */async function translateAligned(texts, wordSets, source, target) {
+  const tl = target || 'zh-CN';
+
+  // ---- 1. 查缓存：对齐结果按「译文语言 + 原文 + 待高亮词集合」缓存 ----
+  // fallback 记录该条是否是「标记失败退回纯译文」的降级结果：
+  // 降级结果只用于当下渲染，不写入缓存，否则之后换生词也修不好（词没翻就是没翻）。
+  const result = {
+    texts: new Array(texts.length).fill(''),
+    spans: new Array(texts.length).fill(null),
+    fallback: new Array(texts.length).fill(false),
+  };
+  const missIdx = [];
+  const missMarked = [];
+
+  for (let i = 0; i < texts.length; i++) {
+    const mk = markWords(texts[i], wordSets?.[i]);
+    // 缓存键版本号 al2：早期版本会把「标记失败退回纯译文」的结果也写进来，
+    // 那些记录的 spans 为空、译文里还夹着英文原词，换版本号即可整体绕过旧脏数据。
+    const key = `${tl}|al2|${hashStr(texts[i])}|${hashStr(((Array.isArray(wordSets?.[i]) ? wordSets[i] : wordSets?.[i] ? [...wordSets[i]] : []).map((w) => String(w).toLowerCase()).sort().join(',')))}`;
+    const hit = await idbGet('translations', key);
+    if (hit && typeof hit.text === 'string' && hit.text.trim() && Array.isArray(hit.spans)) {
+      result.texts[i] = hit.text;
+      result.spans[i] = hit.spans;
+    } else {
+      missIdx.push(i);
+      missMarked.push(mk);
+    }
+  }
+
+  if (!missIdx.length) return result;
+
+  // ---- 2. 需要对齐的句子先打标记；没有待高亮词的句子照常翻 ----
+  const anySlots = missMarked.some((mk) => mk.slots.length);
+  let outs = null;
+  if (anySlots) {
+    try {
+      outs = await translateBatch(missMarked.map((x) => x.marked), source, tl);
+    } catch (_) {
+      outs = null;
+    }
+  }
+
+  const usable =
+    Array.isArray(outs) &&
+    outs.length === missMarked.length &&
+    missMarked.every((mk, i) => {
+      if (!mk.slots.length) return true;
+      const o = outs[i] || '';
+      // 至少第一对哨兵完整保留，才认为这一批的标记没被吃掉
+      return new RegExp(`${SENT_A}0${SENT_B}[\\s\\S]*?${SENT_A}1${SENT_B}`).test(o);
+    });
+
+  if (!usable) {
+    // 引擎（例如 MyMemory）把哨兵吃掉了 → 退回纯译文，中文不高亮但至少能读
+    if (anySlots) console.info('[Trace bg] 标记对齐不可用，退回纯译文');
+    const plainOut = await translateBatch(
+      missIdx.map((i) => texts[i]),
+      source,
+      tl
+    );
+    for (let k = 0; k < missIdx.length; k++) {
+      const i = missIdx[k];
+      result.texts[i] = plainOut[k] || '';
+      result.spans[i] = [];
+      result.fallback[i] = true;
+      // 故意不写缓存：这是降级结果，写进去会让后续即使引擎恢复也一直读到它
+    }
+    return result;
+  }
+
+  // ---- 3. 解析哨兵，得到纯译文 + 中文词位置 ----
+  const reMark = new RegExp(`${SENT_A}\\d+${SENT_B}`, 'g');
+  for (let k = 0; k < missIdx.length; k++) {
+    const i = missIdx[k];
+    const raw = outs[k] || '';
+    const mk = missMarked[k];
+
+    if (!mk.slots.length) {
+      const clean = raw.replace(reMark, '');
+      result.texts[i] = clean;
+      result.spans[i] = [];
+    } else {
+      const { clean, spans } = parseMarked(raw, mk.slots);
+      // 把绝对位置换算成「清洗后文本」里的位置
+      const shifts = [];
+      reMark.lastIndex = 0;
+      let mm;
+      while ((mm = reMark.exec(raw))) shifts.push({ at: mm.index, len: mm[0].length });
+      const adjust = (pos) => {
+        let d = 0;
+        for (const s of shifts) {
+          if (s.at < pos) d += s.len;
+          else break;
+        }
+        return pos - d;
+      };
+      result.texts[i] = clean;
+      result.spans[i] = spans
+        .filter((s) => s.zh && s.start >= 0)
+        .map((s) => ({ word: s.word, zh: s.zh, start: adjust(s.start), end: adjust(s.end) }));
+    }
+
+    // ---- 4. 兜底：哨兵之间没有译出中文（Google 偶尔把标记内的词原样保留）----
+    // 实测 "…save it to your ⟦0⟧wordbook⟦1⟧." 会原样返回英文，
+    // 但同一个词单独送翻是正常的。这里对这类槽位单独补译，再在译文里就地替换。
+    if (mk.slots.length) {
+      await repairUntranslatedSlots(result, i, texts[i], mk, tl);
+    }
+
+    if (result.texts[i]) {
+      await idbPut('translations', {
+        key: `${tl}|al2|${hashStr(texts[i])}|${hashStr(
+          (Array.isArray(wordSets?.[i]) ? wordSets[i] : wordSets?.[i] ? [...wordSets[i]] : []).map((w) => String(w).toLowerCase()).sort().join(',')
+        )}`,
+        source: texts[i],
+        text: result.texts[i],
+        spans: result.spans[i],
+        target: tl,
+        createdAt: Date.now(),
+      });
+    }
+  }
+  return result;
+}
+
+/**
+ * 修掉「哨兵内没翻译」的槽位。
+ *
+ * Google 对某些句子会把 ⟦n⟧word⟦n+1⟧ 整段原样保留，导致译文里夹着英文原词。
+ * 这些词单独送翻通常没问题，所以这里：
+ *   ① 找出 spans 里 zh 为空（或 zh 仍是英文原词）的槽位
+ *   ② 把它们单独翻一遍
+ *   ③ 在已清洗的译文里找到残留的英文原词，替换成中文，并修正 spans 的位置
+ */
+async function repairUntranslatedSlots(result, i, sourceText, mk, tl) {
+  const spans = result.spans[i];
+  if (!Array.isArray(spans) || !spans.length) return;
+
+  // 判断某个 slot 的译文是否其实是「没翻」：没有中文、或内容就是英文原词
+  const looksUntranslated = (s) => {
+    if (!s || !s.zh) return true;
+    const hasCjk = /[\u4e00-\u9fff]/.test(s.zh);
+    if (!hasCjk) return true;
+    // 译文里仍含英文原词（例如 "wordbook" 混在中文里）也算没翻干净
+    return new RegExp(`(^|[^A-Za-z])${escapeRe(s.word)}([^A-Za-z]|$)`, 'i').test(s.zh);
+  };
+
+  const broken = spans.filter((s) => s.start >= 0 && looksUntranslated(s));
+  if (!broken.length) return;
+
+  // 补译这些词（一次批量，去重）
+  const uniq = [...new Set(broken.map((s) => s.word))];
+  let fixed;
+  try {
+    fixed = await translateBatch(uniq, 'en', tl || result.target || 'zh-CN');
+  } catch (_) {
+    return; // 补译失败就算了，保持原样，至少不崩
+  }
+  const dict = {};
+  uniq.forEach((w, k) => {
+    const zh = (fixed?.[k] || '').trim();
+    // 只有真的译出中文才采用，否则宁可不替换
+    if (zh && /[\u4e00-\u9fff]/.test(zh)) dict[w] = zh;
+  });
+  if (!Object.keys(dict).length) return;
+
+  // 在译文里逐个替换残留英文，并记录新位置
+  let text = result.texts[i];
+  const newSpans = [];
+  for (const s of spans) {
+    const zh = dict[s.word];
+    if (!zh || !looksUntranslated(s)) {
+      if (s.start >= 0) newSpans.push(s);
+      continue;
+    }
+    // 在当前位置附近找英文原词（大小写不敏感）
+    const re = new RegExp(escapeRe(s.word), 'gi');
+    re.lastIndex = 0;
+    const m = re.exec(text);
+    if (!m) {
+      // 找不到就不高亮，避免错位
+      continue;
+    }
+    const before = text.slice(0, m.index);
+    const after = text.slice(m.index + m[0].length);
+    text = before + zh + after;
+    newSpans.push({ word: s.word, zh, start: m.index, end: m.index + zh.length });
+  }
+
+  // 替换会让后面 span 的位置变化，重新按出现顺序算一遍
+  result.texts[i] = text;
+  result.spans[i] = recomputeSpanOffsets(text, newSpans);
+}
+
+/** 按 span 的 word 在最终译文里出现顺序，重新计算 start/end（去重叠） */
+function recomputeSpanOffsets(text, spans) {
+  const out = [];
+  let cursor = 0;
+  const sorted = spans.filter((s) => s && s.word && s.zh).sort((a, b) => a.start - b.start);
+  for (const s of sorted) {
+    const at = text.indexOf(s.zh, cursor);
+    if (at < 0) continue;
+    out.push({ word: s.word, zh: s.zh, start: at, end: at + s.zh.length });
+    cursor = at + s.zh.length;
+  }
+  return out;
+}
+
+function escapeRe(s) {
+  return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 /** 稳定哈希（放在后台，避免通过消息传函数） */
 function hashStr(str) {
   let h1 = 0xdeadbeef, h2 = 0x41c6ce57;
@@ -561,6 +843,18 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             ),
           });
           break;
+        case 'translate:aligned':
+          // 带生词对齐的翻译：除了译文，还返回每个生词在译文中的位置
+          sendResponse({
+            ok: true,
+            data: await translateAligned(
+              msg.texts || [],
+              msg.wordSets || [],
+              msg.source || 'auto',
+              msg.target || 'zh-CN'
+            ),
+          });
+          break;
         case 'dict':
           console.info('[Trace bg] dict start', msg.word);
           {
@@ -641,9 +935,21 @@ globalThis.__traceDebug = {
   googleTranslate,
   googleChunked,
   myMemoryAll,
+  translateAligned,
+  markWords,
+  parseMarked,
   lookupWord,
   addWord,
+  /** 测试辅助：与消息路由 'word:add' 完全同一条路径（写入 + 广播） */
+  addWordNotify: async (payload) => {
+    const rec = await addWord(payload || {});
+    await broadcastWordsChanged();
+    return rec;
+  },
   listWords,
   wordKeys,
   hasWord,
+  removeWord,
+  /** 测试辅助：与消息路由 'word:remove' 同一条路径（删除 + 广播） */
+  removeWordNotify: (word) => removeWord(word),
 };

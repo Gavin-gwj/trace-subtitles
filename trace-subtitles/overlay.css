@@ -163,6 +163,33 @@
   color: #fff;
 }
 
+/*
+ * 译文里对应生词的那段中文。
+ *
+ * 和英文侧刻意做成"同色系、不同形状"：
+ *   英文 = 淡黄底 + 实下划线（圆角方块感，提醒"这个词你收藏了"）
+ *   中文 = 无底色 + 青色虚线下划线 + 斜体（提醒"这里就是它的意思"）
+ * 两者同时出现时，眼睛能立刻把左右两边连起来，又不会因为两块黄底
+ * 互相抢注意力。青色（#7fe3d4）在深色毛玻璃上对比度高，和黄色区分明显。
+ */
+#trace-sub-overlay .trace-saved-zh {
+  color: #7fe3d4;
+  font-style: italic;
+  text-decoration: underline;
+  text-decoration-style: dashed;
+  text-decoration-thickness: 2px;
+  text-underline-offset: 4px;
+  text-decoration-color: rgba(127, 227, 212, .9);
+  cursor: pointer;
+  padding: 0 1px;
+  border-radius: 2px;
+  transition: background-color .12s ease, color .12s ease;
+}
+#trace-sub-overlay .trace-saved-zh:hover {
+  background: rgba(127, 227, 212, .22);
+  color: #b6f5ec;
+}
+
 /* ------------------------------------------------------------ 查词弹窗 */
 
 #trace-word-popup {

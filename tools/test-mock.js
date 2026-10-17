@@ -174,6 +174,7 @@ const WATCH = `${ORIGIN}/watch?v=${fx.VIDEO_ID}`;
   let wordTest = null;
   let added = null;
   let highlight = null;
+  let zhHighlight = null;
   let reopenState = null;
   try {
     // 先暂停播放：查词/生词本/高亮断言都要求字幕停在当前句，
@@ -246,6 +247,33 @@ const WATCH = `${ORIGIN}/watch?v=${fx.VIDEO_ID}`;
         }, savedWord);
         console.log('highlight:', JSON.stringify(highlight));
 
+        // ---- 中文高亮断言：译文里对应那个词的片段应带 trace-saved-zh ----
+        // 加入生词本后会触发 realignActive()，需要等带哨兵的对齐翻译返回
+        for (let i = 0; i < 24; i++) {
+          await page.waitForTimeout(500);
+          zhHighlight = await page.evaluate(() => {
+            const t = document.querySelector('#trace-sub-overlay .trace-sub-trans');
+            if (!t) return { present: false };
+            const spans = [...t.querySelectorAll('.trace-saved-zh')];
+            const style = spans[0] ? getComputedStyle(spans[0]) : null;
+            return {
+              present: true,
+              transText: t.textContent || '',
+              count: spans.length,
+              words: spans.map((s) => s.dataset.w),
+              texts: spans.map((s) => s.textContent),
+              hasItalic: style ? style.fontStyle === 'italic' : false,
+              hasUnderline: style ? style.textDecorationLine.includes('underline') : false,
+              underlineStyle: style ? style.textDecorationStyle : '',
+              color: style ? style.color : '',
+              // 译文里不应残留哨兵字符
+              hasSentinel: /[\u27E6\u27E7]/.test(t.textContent || ''),
+            };
+          });
+          if (zhHighlight.count > 0) break;
+        }
+        console.log('zh highlight:', JSON.stringify(zhHighlight, null, 1));
+
         // ---- 重新点击该词：弹窗应显示"已在生词本"，而不是"加入生词本" ----
         await page.click('#trace-word-popup [data-act="close"]').catch(() => {});
         await page.waitForTimeout(300);
@@ -286,10 +314,19 @@ const WATCH = `${ORIGIN}/watch?v=${fx.VIDEO_ID}`;
   await ctx.close();
 
   const hlOk = !!(highlight && highlight.found && highlight.hasSavedClass);
+  const zhOk = !!(
+    zhHighlight &&
+    zhHighlight.present &&
+    zhHighlight.count > 0 &&
+    !zhHighlight.hasSentinel &&
+    zhHighlight.hasItalic &&
+    zhHighlight.hasUnderline &&
+    zhHighlight.underlineStyle === 'dashed'
+  );
   const reopenOk = !!(reopenState && reopenState.btnAct === 'remove');
-  const pass = ok && seg && seg.sentences > 0 && hlOk && reopenOk;
+  const pass = ok && seg && seg.sentences > 0 && hlOk && zhOk && reopenOk;
   console.log(
-    `\nchecks: subs=${!!ok} seg=${seg?.sentences || 0} highlight=${hlOk} reopen=${reopenOk}`
+    `\nchecks: subs=${!!ok} seg=${seg?.sentences || 0} highlight=${hlOk} zhHighlight=${zhOk} reopen=${reopenOk}`
   );
   console.log(pass ? '\nRESULT: PASS' : '\nRESULT: FAIL');
   process.exit(pass ? 0 : 1);
