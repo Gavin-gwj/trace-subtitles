@@ -316,7 +316,7 @@ store），同一个视频二次打开不再请求网络。
 - **退化路径**：若引擎把哨兵全吃掉（例如 MyMemory），`usable` 判定失败 → 退回纯译文，
   中文不高亮但至少能读，不会显示乱码。
 
-### 过程中修掉的十个真实 bug（值得记录）
+### 过程中修掉的十一个真实 bug（值得记录）
 
 **bug 1：跨消息传函数。** `content.js` 曾把 `hash: S.hash` 放进 `chrome.runtime.sendMessage`，
 而消息经过结构化克隆会丢掉函数，SW 侧抛 `TypeError: hashFn is not a function`。
@@ -730,6 +730,8 @@ function niceScale(raw) {
 ### 功能
 
 - **双语字幕**：原文 + 译文双层，随播放高亮推进
+- **字幕贴视频画面**（不是贴浏览器窗口）：非全屏时精确落在播放器矩形内，影院模式 / 顶栏折叠 /
+  改窗口大小都跟着走；**全屏时按画面宽度等比放大字号与行宽**，退出全屏又等比缩回
 - **显示模式**：双语 / 仅译文 / 仅原文
 - **目标语言**：简体中文、繁体中文、日、韩、英、法、德、西、俄、葡（10 种）
 - **翻译引擎**：Google（推荐，快）/ MyMemory（备用）
@@ -776,6 +778,7 @@ node test-center.js          # 拖动后按中心点定位（长短句不左右�
 node test-ui.js              # 手柄悬停显隐 + 悬浮按钮 + 页内面板 + 字幕样式，截图 shot-ui*.png
 node test-zh-highlight.js    # 译文里对应中文也高亮（多词 / 点击 / 移除），截图 shot-zh-highlight.png
 node test-wordbook.js        # 词库看板：KPI/状态环/柱状图/筛选/搜索/抽屉/复习/删除/粒度切换
+node test-frame.js           # 字幕贴视频框 + 全屏等比放大 + 退全屏缩回，截图 shot-frame-*.png
 ```
 
 `tools/mock/` 用 Playwright `page.route()` 整体伪造 `https://www.youtube.com/**`，
@@ -898,6 +901,7 @@ D:\MyFiles\项目\Trace\
    ├─ test-ui.js                手柄显隐 + 悬浮按钮 + 页内面板 + 字幕样式回归测试
    ├─ test-zh-highlight.js      译文里对应中文高亮回归测试（多词/点击/移除）
    ├─ test-wordbook.js          词库看板回归测试（KPI/图表/筛选/抽屉/复习）
+   ├─ test-frame.js             字幕贴视频框 + 全屏等比放大回归测试
    ├─ probe-ext2\               主世界 vs 隔离世界对照实验
    ├─ probe-transcript.js       get_transcript 接口探针
    ├─ gen-icons.js              纯 Node 生成 PNG 图标
@@ -909,6 +913,8 @@ D:\MyFiles\项目\Trace\
    ├─ shot-zh-highlight.png     译文中文高亮截图
    ├─ shot-wordbook.png         词库看板截图
    ├─ shot-wordbook-drawer.png  词库看板单词抽屉截图
+   ├─ shot-frame-normal.png     非全屏：字幕落在视频画面内
+   ├─ shot-frame-fullscreen.png 全屏：字幕随画面等比放大
    └─ shot-glass.png            毛玻璃 + 3 点拖动胶囊截图
 ```
 
