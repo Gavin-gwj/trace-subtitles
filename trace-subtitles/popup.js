@@ -74,6 +74,13 @@ function initSettingsUI() {
     onChange: (v) => ($('positionVal').textContent = v),
   });
   bindSetting('clickWord', 'clickWord');
+
+  // 拖动过字幕框后回到「底部居中」预设位置
+  $('resetPos').addEventListener('click', async (ev) => {
+    ev.preventDefault();
+    await saveSettings({ freePos: null });
+    $('positionVal').textContent = $('position').value;
+  });
 }
 
 // ---------------------------------------------------------------- 生词本

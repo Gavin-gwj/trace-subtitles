@@ -80,13 +80,14 @@ function pageHtml(videoId = VIDEO_ID, opts = {}) {
 <title>Mock Video - YouTube</title>
 <style>
   html,body { margin:0; padding:0; background:#0f0f0f; color:#fff;
-    font-family:Roboto,Arial,sans-serif; }
-  #movie_player { position:relative; width:960px; height:540px; margin:40px auto;
-    background:#000; border-radius:12px; overflow:hidden; }
+    font-family:Roboto,Arial,sans-serif; overflow:hidden; }
+  /* 铺满视口，模拟真实 YouTube 剧场模式，这样字幕框是压在画面上而不是页面空白上 */
+  #movie_player { position:fixed; inset:0; width:100vw; height:100vh; margin:0;
+    background:#000; overflow:hidden; }
   #movie_player video { position:absolute; inset:0; width:100%; height:100%;
     object-fit:contain; background:#000; }
   #movie_player canvas { position:absolute; inset:0; width:100%; height:100%; }
-  .hint { width:960px; margin:0 auto; color:#888; font-size:13px; }
+  .hint { position:fixed; left:12px; bottom:6px; color:#888; font-size:12px; z-index:2; }
 </style>
 </head>
 <body>

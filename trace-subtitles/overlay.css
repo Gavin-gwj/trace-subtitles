@@ -4,12 +4,11 @@
 #trace-sub-overlay {
   --trace-font-scale: 1;
   --trace-bottom: 18%;
+  --trace-radius: 12px;
+  --trace-blur: 18px;
+  --trace-alpha: .55;
   position: fixed;
-  left: 0;
-  right: 0;
-  bottom: var(--trace-bottom);
-  display: flex;
-  justify-content: center;
+  inset: 0;
   pointer-events: none;
   z-index: 2147483000;
   font-family: "YouTube Sans", "Roboto", "PingFang SC", "Microsoft YaHei", sans-serif;
@@ -22,31 +21,94 @@
 }
 
 #trace-sub-overlay .trace-sub-box {
-  max-width: min(88vw, 1000px);
-  padding: 10px 20px 12px;
-  border-radius: 12px;
-  background: rgba(8, 8, 8, .78);
-  backdrop-filter: blur(6px);
+  position: absolute;
+  left: 50%;
+  bottom: var(--trace-bottom);
+  transform: translateX(-50%);
+  width: max-content;
+  max-width: min(94vw, 1180px);
+  padding: 13px 26px 15px;
+  border-radius: var(--trace-radius);
+  /* 高斯毛玻璃：半透明深底 + backdrop blur，透出画面纹理 */
+  background: rgba(38, 38, 40, var(--trace-alpha));
+  backdrop-filter: blur(var(--trace-blur)) saturate(140%);
+  -webkit-backdrop-filter: blur(var(--trace-blur)) saturate(140%);
   text-align: center;
   pointer-events: auto;
-  box-shadow: 0 4px 18px rgba(0, 0, 0, .35);
+  box-shadow: 0 8px 30px rgba(0, 0, 0, .38);
+  transition: box-shadow .18s ease, background-color .18s ease;
+}
+
+/* 自由拖拽定位：由 JS 写 left/top，取消默认的居中与底部定位 */
+#trace-sub-overlay[data-free="1"] .trace-sub-box {
+  left: auto;
+  bottom: auto;
+  transform: none;
+}
+
+#trace-sub-overlay .trace-sub-box.trace-dragging {
+  box-shadow: 0 16px 48px rgba(0, 0, 0, .55), 0 0 0 2px rgba(124, 141, 255, .55);
+  background: rgba(38, 38, 40, .74);
+}
+
+/* ------------------------------------------------------------ 拖动手柄 */
+
+/* 黑色胶囊 + 3 个白点，悬停时才显形，避免挡字幕 */
+#trace-sub-overlay .trace-drag-handle {
+  position: absolute;
+  top: -24px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 60px;
+  height: 18px;
+  border-radius: 9px;
+  background: rgba(14, 14, 16, .94);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  cursor: grab;
+  opacity: .55;
+  transition: opacity .18s ease, background-color .15s ease;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, .45);
+  pointer-events: auto;
+  touch-action: none;
+}
+#trace-sub-overlay .trace-sub-box:hover .trace-drag-handle,
+#trace-sub-overlay .trace-sub-box.trace-dragging .trace-drag-handle {
+  opacity: 1;
+}
+#trace-sub-overlay .trace-drag-handle:hover {
+  background: rgba(44, 44, 48, .98);
+}
+#trace-sub-overlay .trace-sub-box.trace-dragging .trace-drag-handle {
+  cursor: grabbing;
+}
+#trace-sub-overlay .trace-drag-handle i {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, .88);
+  display: block;
 }
 
 #trace-sub-overlay .trace-sub-orig {
-  font-size: calc(26px * var(--trace-font-scale));
-  line-height: 1.35;
-  color: #f2f2f2;
-  text-shadow: 0 1px 2px rgba(0, 0, 0, .9);
-  font-weight: 500;
+  font-size: calc(28px * var(--trace-font-scale));
+  line-height: 1.34;
+  color: #fff;
+  font-weight: 600;
+  letter-spacing: .1px;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, .75);
   user-select: text;
 }
 
 #trace-sub-overlay .trace-sub-trans {
-  margin-top: 4px;
+  margin-top: 7px;
   font-size: calc(21px * var(--trace-font-scale));
-  line-height: 1.4;
-  color: #ffd76e;
-  text-shadow: 0 1px 2px rgba(0, 0, 0, .9);
+  line-height: 1.45;
+  color: rgba(255, 255, 255, .92);
+  font-weight: 400;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, .7);
   min-height: 1em;
 }
 

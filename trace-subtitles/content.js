@@ -72,7 +72,7 @@
 
   // ------------------------------------------------------------ DOM
 
-  let overlayEl, origEl, transEl, tipEl, popupEl;
+  let overlayEl, origEl, transEl, tipEl, popupEl, boxEl, handleEl;
 
   function buildOverlay() {
     if (overlayEl) return;
@@ -80,14 +80,97 @@
     overlayEl.id = 'trace-sub-overlay';
     overlayEl.innerHTML = `
       <div class="trace-sub-box">
+        <div class="trace-drag-handle" title="拖动调整位置">
+          <i></i><i></i><i></i>
+        </div>
         <div class="trace-sub-orig"></div>
         <div class="trace-sub-trans"></div>
       </div>`;
     document.documentElement.appendChild(overlayEl);
     origEl = overlayEl.querySelector('.trace-sub-orig');
     transEl = overlayEl.querySelector('.trace-sub-trans');
+    boxEl = overlayEl.querySelector('.trace-sub-box');
+    handleEl = overlayEl.querySelector('.trace-drag-handle');
 
     origEl.addEventListener('click', onWordClick);
+    initDrag();
+  }
+
+  /** 把保存的自由位置应用到字幕框 */
+  function applyFreePosition(pos) {
+    if (!boxEl) return;
+    if (!pos) {
+      overlayEl.removeAttribute('data-free');
+      boxEl.style.left = '';
+      boxEl.style.top = '';
+      return;
+    }
+    overlayEl.dataset.free = '1';
+    boxEl.style.left = pos.x + 'px';
+    boxEl.style.top = pos.y + 'px';
+  }
+
+  /** 拖拽：按住顶部手柄移动字幕框，位置持久化 */
+  function initDrag() {
+    let drag = null;
+
+    const onDown = (ev) => {
+      if (ev.button !== 0) return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      const r = boxEl.getBoundingClientRect();
+      drag = { dx: ev.clientX - r.left, dy: ev.clientY - r.top };
+      boxEl.classList.add('trace-dragging');
+      handleEl.setPointerCapture?.(ev.pointerId);
+    };
+
+    const onMove = (ev) => {
+      if (!drag) return;
+      ev.preventDefault();
+      // 限制在视口内，避免拖丢
+      const r = boxEl.getBoundingClientRect();
+      const maxX = window.innerWidth - r.width - 4;
+      const maxY = window.innerHeight - r.height - 4;
+      const x = Math.max(4, Math.min(ev.clientX - drag.dx, Math.max(4, maxX)));
+      const y = Math.max(4, Math.min(ev.clientY - drag.dy, Math.max(4, maxY)));
+      applyFreePosition({ x: Math.round(x), y: Math.round(y) });
+    };
+
+    const onUp = () => {
+      if (!drag) return;
+      drag = null;
+      boxEl.classList.remove('trace-dragging');
+      const pos = {
+        x: parseFloat(boxEl.style.left) || 0,
+        y: parseFloat(boxEl.style.top) || 0,
+      };
+      savePosition(pos);
+    };
+
+    handleEl.addEventListener('pointerdown', onDown);
+    window.addEventListener('pointermove', onMove, { passive: false });
+    window.addEventListener('pointerup', onUp);
+    window.addEventListener('pointercancel', onUp);
+
+    // 窗口尺寸变化时，避免字幕框跑到视口外
+    window.addEventListener('resize', () => {
+      if (!state.settings?.freePos || !boxEl) return;
+      const r = boxEl.getBoundingClientRect();
+      const x = Math.min(parseFloat(boxEl.style.left) || 0, Math.max(4, window.innerWidth - r.width - 4));
+      const y = Math.min(parseFloat(boxEl.style.top) || 0, Math.max(4, window.innerHeight - r.height - 4));
+      applyFreePosition({ x: Math.round(x), y: Math.round(y) });
+    });
+  }
+
+  let saveTimer = null;
+  function savePosition(pos) {
+    state.settings.freePos = pos;
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(async () => {
+      try {
+        await chrome.runtime.sendMessage({ type: 'settings:set', patch: { freePos: pos } });
+      } catch (_) {}
+    }, 300);
   }
 
   function applySettingsToOverlay() {
@@ -97,6 +180,8 @@
     overlayEl.style.setProperty('--trace-bottom', (s.position ?? 18) + '%');
     overlayEl.dataset.mode = s.mode;
     overlayEl.classList.toggle('trace-hidden', !s.enabled);
+    // 有保存的自由位置就进入自由模式，否则回到默认底部居中
+    applyFreePosition(s.freePos || null);
   }
 
   function renderActive(sentence) {

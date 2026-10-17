@@ -321,6 +321,9 @@ await Promise.all([dictTask /* 3.5s 超时，失败静默 */, zhTask /* Google �
 - **目标语言**：简体中文、繁体中文、日、韩、英、法、德、西、俄、葡（10 种）
 - **翻译引擎**：Google（推荐，快）/ MyMemory（备用）
 - **字号、字幕位置**：popup 里实时调
+- **毛玻璃字幕框**：深色半透明底 + `backdrop-filter: blur(18px)`，透出画面纹理而不是死黑板
+- **自由拖动**：鼠标移到字幕框上，顶部浮出黑色胶囊（3 个白点）→ 按住即可拖到任意位置；
+  位置自动记住，换视频/刷新都保持；popup 里「恢复居中」可回到默认底部位置
 - **点击查词**：点字幕里任意单词 → 音标 + 中文释义 + 英文释义 + 例句
 - **生词本**：一键加入，记录单词/释义/**所在句子与译文**/视频标题/时间点，可搜索、删除、
   导出 JSON，点击条目跳回原视频那一秒
@@ -343,6 +346,7 @@ cd tools
 npm i                        # 安装 playwright
 node test-mock.js            # 基础链路，输出 PASS/FAIL + 截图 shot-mock.png
 node test-pot.js             # pot 签名回归测试 + 截图 shot-pot.png
+node test-drag.js            # 毛玻璃 + 拖动 + 位置持久化 + 截图 shot-drag.png
 ```
 
 `tools/mock/` 用 Playwright `page.route()` 整体伪造 `https://www.youtube.com/**`，
@@ -398,10 +402,14 @@ D:\MyFiles\项目\Trace\
    ├─ mock\server.js            本地夹具站点 :8899
    ├─ test-mock.js              端到端自动化测试
    ├─ test-pot.js               pot 签名回归测试
+   ├─ test-drag.js              毛玻璃 + 拖动 + 位置持久化测试
+   ├─ shot-glass.js             截图脚本（等字幕渲染后截毛玻璃效果）
    ├─ probe-*.js                逆向探针（网络端点、SW 能力、查词分步、get_transcript）
    ├─ gen-icons.js              纯 Node 生成 PNG 图标
    ├─ shot-mock.png             验证截图
-   └─ shot-pot.png              pot 模式验证截图
+   ├─ shot-pot.png              pot 模式验证截图
+   ├─ shot-drag.png             拖动后截图
+   └─ shot-glass.png            毛玻璃 + 3 点拖动胶囊截图
 ```
 
 ## 五、与 Trancy 的差距

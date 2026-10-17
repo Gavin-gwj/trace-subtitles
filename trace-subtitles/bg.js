@@ -15,7 +15,8 @@ const DEFAULT_SETTINGS = {
   sourceLang: 'auto',
   mode: 'bilingual', // bilingual | translation-only | original-only
   fontScale: 1,
-  position: 18, // 距底部百分比
+  position: 18, // 距底部百分比（仅在未自由拖动时生效）
+  freePos: null, // 自由拖动后的 {x, y} 像素坐标；null 表示用 position 的默认底部居中
   engine: 'google',
   autoHideNative: true,
   clickWord: true,
