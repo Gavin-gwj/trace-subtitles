@@ -1,0 +1,183 @@
+/* Trace 字幕翻译 —— 字幕覆盖层样式
+   全部使用 !important，避免被 YouTube 自身样式覆盖 */
+
+#trace-sub-overlay {
+  --trace-font-scale: 1;
+  --trace-bottom: 18%;
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: var(--trace-bottom);
+  display: flex;
+  justify-content: center;
+  pointer-events: none;
+  z-index: 2147483000;
+  font-family: "YouTube Sans", "Roboto", "PingFang SC", "Microsoft YaHei", sans-serif;
+  transition: opacity .18s ease;
+}
+
+#trace-sub-overlay.trace-hidden,
+#trace-sub-overlay.trace-empty {
+  opacity: 0;
+}
+
+#trace-sub-overlay .trace-sub-box {
+  max-width: min(88vw, 1000px);
+  padding: 10px 20px 12px;
+  border-radius: 12px;
+  background: rgba(8, 8, 8, .78);
+  backdrop-filter: blur(6px);
+  text-align: center;
+  pointer-events: auto;
+  box-shadow: 0 4px 18px rgba(0, 0, 0, .35);
+}
+
+#trace-sub-overlay .trace-sub-orig {
+  font-size: calc(26px * var(--trace-font-scale));
+  line-height: 1.35;
+  color: #f2f2f2;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, .9);
+  font-weight: 500;
+  user-select: text;
+}
+
+#trace-sub-overlay .trace-sub-trans {
+  margin-top: 4px;
+  font-size: calc(21px * var(--trace-font-scale));
+  line-height: 1.4;
+  color: #ffd76e;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, .9);
+  min-height: 1em;
+}
+
+#trace-sub-overlay .trace-sub-trans.trace-loading {
+  color: rgba(255, 255, 255, .35);
+}
+
+/* 显示模式 */
+#trace-sub-overlay[data-mode="translation-only"] .trace-sub-orig {
+  display: none;
+}
+#trace-sub-overlay[data-mode="original-only"] .trace-sub-trans {
+  display: none;
+}
+
+/* 可点击单词 */
+#trace-sub-overlay .trace-word {
+  cursor: pointer;
+  border-radius: 3px;
+  transition: background-color .12s ease, color .12s ease;
+}
+#trace-sub-overlay .trace-word:hover {
+  background: rgba(255, 215, 110, .28);
+  color: #fff;
+}
+
+/* ------------------------------------------------------------ 查词弹窗 */
+
+#trace-word-popup {
+  position: fixed;
+  z-index: 2147483001;
+  box-sizing: border-box;
+  background: #fff;
+  color: #1a1a1a;
+  border-radius: 12px;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, .28), 0 0 0 1px rgba(0, 0, 0, .06);
+  font-family: "Roboto", "PingFang SC", "Microsoft YaHei", sans-serif;
+  overflow: hidden;
+  transition: opacity .15s ease, transform .15s ease;
+}
+#trace-word-popup.trace-hidden {
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(4px);
+}
+
+#trace-word-popup .trace-pop-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 14px 6px;
+}
+#trace-word-popup .trace-pop-word {
+  font-size: 19px;
+  font-weight: 700;
+  color: #111;
+}
+#trace-word-popup .trace-pop-close {
+  border: none;
+  background: transparent;
+  font-size: 20px;
+  line-height: 1;
+  color: #999;
+  cursor: pointer;
+  padding: 0 2px;
+}
+#trace-word-popup .trace-pop-close:hover {
+  color: #333;
+}
+
+#trace-word-popup .trace-pop-body {
+  padding: 0 14px 12px;
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+#trace-word-popup .trace-pop-phon {
+  color: #888;
+  font-size: 13px;
+  margin-bottom: 4px;
+}
+#trace-word-popup .trace-pop-zh {
+  font-size: 16px;
+  font-weight: 600;
+  color: #d0342c;
+  margin-bottom: 8px;
+}
+#trace-word-popup .trace-pop-meanings {
+  margin: 0;
+  padding-left: 16px;
+  font-size: 13px;
+  line-height: 1.55;
+  color: #333;
+}
+#trace-word-popup .trace-pop-meanings i {
+  color: #2f7d32;
+  font-style: normal;
+  margin-right: 4px;
+}
+#trace-word-popup .trace-pop-ex {
+  margin-top: 8px;
+  padding: 6px 8px;
+  background: #f6f6f6;
+  border-radius: 6px;
+  font-size: 12.5px;
+  color: #555;
+  line-height: 1.5;
+}
+#trace-word-popup .trace-pop-loading {
+  color: #999;
+  font-size: 13px;
+  padding: 8px 0;
+}
+#trace-word-popup .trace-pop-actions {
+  margin-top: 10px;
+}
+#trace-word-popup .trace-pop-add {
+  width: 100%;
+  padding: 8px 0;
+  border: none;
+  border-radius: 8px;
+  background: #065fd4;
+  color: #fff;
+  font-size: 13.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background .15s ease;
+}
+#trace-word-popup .trace-pop-add:hover {
+  background: #0450b0;
+}
+#trace-word-popup .trace-pop-add.trace-done {
+  background: #2e7d32;
+}

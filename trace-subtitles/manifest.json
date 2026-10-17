@@ -1,0 +1,45 @@
+{
+  "manifest_version": 3,
+  "name": "Trace 字幕翻译",
+  "version": "1.0.0",
+  "description": "YouTube 双语字幕实时翻译、点击查词与生词本 —— Trancy 核心能力复刻",
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "permissions": ["storage", "unlimitedStorage"],
+  "host_permissions": [
+    "https://*.youtube.com/*",
+    "https://translate.googleapis.com/*",
+    "https://api.mymemory.translated.net/*",
+    "https://api.dictionaryapi.dev/*"
+  ],
+  "background": {
+    "service_worker": "bg.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "Trace 字幕翻译",
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png"
+    }
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://*.youtube.com/*"],
+      "js": ["main-world.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": ["https://*.youtube.com/*"],
+      "js": ["subtitles.js", "content.js"],
+      "css": ["overlay.css"],
+      "run_at": "document_start"
+    }
+  ]
+}

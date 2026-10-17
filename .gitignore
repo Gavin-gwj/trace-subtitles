@@ -1,0 +1,22 @@
+# 依赖
+node_modules/
+package-lock.json
+
+# 测试用的临时 Chrome profile（Playwright 生成，含缓存与登录态，绝不入库）
+.chrome*/
+tools/.chrome*/
+
+# 逆向临时工作区
+tools/probe-ext*/
+
+# 本地进度记录
+.dsh-progress/
+
+# 系统 / 编辑器
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# 日志
+*.log
