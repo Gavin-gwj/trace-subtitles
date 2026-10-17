@@ -73,6 +73,7 @@
   // ------------------------------------------------------------ DOM
 
   let overlayEl, origEl, transEl, tipEl, popupEl, boxEl, handleEl;
+  let launcherEl, panelEl;
 
   function buildOverlay() {
     if (overlayEl) return;
@@ -94,6 +95,308 @@
 
     origEl.addEventListener('click', onWordClick);
     initDrag();
+  }
+
+  // ------------------------------------------------------------ 悬浮按钮 + 页内面板
+
+  /**
+   * 播放器右下角的悬浮按钮（Trancy 风格）。
+   * 位置跟随 YouTube 播放器：贴在其右下角内侧，播放器不存在时贴视口右下角。
+   * 用 position:fixed + 实时读 getBoundingClientRect，所以全屏/网页全屏/改窗口都能跟上。
+   */
+  function buildLauncher() {
+    if (launcherEl) return;
+    launcherEl = document.createElement('button');
+    launcherEl.id = 'trace-launcher';
+    launcherEl.type = 'button';
+    launcherEl.title = 'Trace 字幕设置';
+    launcherEl.innerHTML = 'T';
+    launcherEl.addEventListener('click', (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      togglePanel();
+    });
+    document.documentElement.appendChild(launcherEl);
+    positionLauncher();
+
+    // 播放器尺寸/位置变化（全屏切换、窗口缩放、影院模式）都要重新贴边
+    window.addEventListener('resize', positionLauncher);
+    document.addEventListener('fullscreenchange', positionLauncher);
+    window.addEventListener('scroll', positionLauncher, { passive: true });
+    // YouTube 自己会改播放器尺寸，用 ResizeObserver 跟住
+    if (window.ResizeObserver) {
+      const ro = new ResizeObserver(() => positionLauncher());
+      const mp = document.getElementById('movie_player');
+      if (mp) ro.observe(mp);
+    }
+    // 播放器可能晚于脚本出现，轮询几次补挂
+    let tries = 0;
+    const timer = setInterval(() => {
+      positionLauncher();
+      const mp = document.getElementById('movie_player');
+      if (mp && window.ResizeObserver) {
+        // 观察一次即可
+        clearInterval(timer);
+      } else if (++tries > 30) {
+        clearInterval(timer);
+      }
+    }, 500);
+  }
+
+  /** 把悬浮按钮贴到播放器右下角内侧（避开控制栏） */
+  function positionLauncher() {
+    if (!launcherEl) return;
+    const mp = document.getElementById('movie_player');
+    const v = getVideo();
+    const r = (mp || v)?.getBoundingClientRect?.();
+    const size = 34;
+    const gap = 12;
+    let x, y;
+    if (r && r.width > 80 && r.height > 80) {
+      x = r.right - size - gap;
+      // 稍微上移，避免压住 YouTube 自带的控制栏按钮
+      y = r.bottom - size - gap - 6;
+    } else {
+      x = window.innerWidth - size - gap;
+      y = window.innerHeight - size - gap;
+    }
+    launcherEl.style.left = Math.round(Math.max(4, Math.min(x, window.innerWidth - size - 4))) + 'px';
+    launcherEl.style.top = Math.round(Math.max(4, Math.min(y, window.innerHeight - size - 4))) + 'px';
+  }
+
+  function togglePanel(force) {
+    if (!panelEl) buildPanel();
+    const show = force === undefined ? panelEl.classList.contains('trace-hidden') : !!force;
+    panelEl.classList.toggle('trace-hidden', !show);
+    if (show) syncPanelUI();
+  }
+
+  /** 构建页内设置面板（深色侧栏，结构对齐 Trancy 的「Trancy 字幕」菜单） */
+  function buildPanel() {
+    if (panelEl) return;
+    panelEl = document.createElement('div');
+    panelEl.id = 'trace-panel';
+    panelEl.className = 'trace-hidden';
+    panelEl.innerHTML = `
+      <div class="tp-head">
+        <div class="tp-logo">T</div>
+        <div class="tp-title">Trace 字幕</div>
+        <button class="tp-close" type="button" title="关闭">×</button>
+      </div>
+      <div class="tp-body">
+        <div class="tp-row">
+          <div class="tp-label">启用双语字幕<div class="tp-sub">在播放器上叠加译文</div></div>
+          <label class="tp-switch"><input type="checkbox" data-k="enabled" /><span class="tp-slider"></span></label>
+        </div>
+
+        <div class="tp-row">
+          <div class="tp-label">主字幕<div class="tp-sub">原文语言</div></div>
+          <select data-k="sourceLang">
+            <option value="auto">自动检测</option>
+            <option value="en">English</option>
+            <option value="ja">日本語</option>
+            <option value="ko">한국어</option>
+            <option value="zh-CN">简体中文</option>
+            <option value="es">Español</option>
+            <option value="fr">Français</option>
+            <option value="de">Deutsch</option>
+            <option value="ru">Русский</option>
+          </select>
+        </div>
+
+        <div class="tp-row">
+          <div class="tp-label">翻译字幕<div class="tp-sub">译文语言</div></div>
+          <select data-k="targetLang">
+            <option value="zh-CN">简体中文</option>
+            <option value="zh-TW">繁體中文</option>
+            <option value="en">English</option>
+            <option value="ja">日本語</option>
+            <option value="ko">한국어</option>
+            <option value="es">Español</option>
+            <option value="fr">Français</option>
+            <option value="de">Deutsch</option>
+            <option value="ru">Русский</option>
+            <option value="pt">Português</option>
+          </select>
+        </div>
+
+        <div class="tp-row">
+          <div class="tp-label">翻译引擎</div>
+          <select data-k="engine">
+            <option value="google">Google</option>
+            <option value="mymemory">MyMemory</option>
+          </select>
+        </div>
+
+        <div class="tp-row">
+          <div class="tp-label">字幕显示</div>
+          <select data-k="mode">
+            <option value="bilingual">双语字幕</option>
+            <option value="translation-only">仅译文</option>
+            <option value="original-only">仅原文</option>
+          </select>
+        </div>
+
+        <div class="tp-group tp-open" data-group="style">
+          <button class="tp-group-head" type="button">
+            <span>字幕样式</span>
+            <span class="tp-caret">▶</span>
+          </button>
+          <div class="tp-group-body">
+            <div class="tp-field">
+              <span>原文字号</span>
+              <input type="range" data-k="origSize" min="14" max="48" step="1" />
+              <span class="tp-val" data-v="origSize"></span>
+            </div>
+            <div class="tp-field">
+              <span>译文字号</span>
+              <input type="range" data-k="transSize" min="12" max="40" step="1" />
+              <span class="tp-val" data-v="transSize"></span>
+            </div>
+            <div class="tp-field">
+              <span>原文颜色</span>
+              <input type="color" data-k="origColor" />
+              <span class="tp-val"></span>
+            </div>
+            <div class="tp-field">
+              <span>译文颜色</span>
+              <input type="color" data-k="transColor" />
+              <span class="tp-val"></span>
+            </div>
+            <div class="tp-field">
+              <span>背景透明</span>
+              <input type="range" data-k="bgAlpha" min="0" max="0.95" step="0.05" />
+              <span class="tp-val" data-v="bgAlpha"></span>
+            </div>
+            <div class="tp-field">
+              <span>圆角</span>
+              <input type="range" data-k="radius" min="0" max="28" step="1" />
+              <span class="tp-val" data-v="radius"></span>
+            </div>
+            <div class="tp-field">
+              <span>高斯模糊</span>
+              <input type="range" data-k="blur" min="0" max="40" step="1" />
+              <span class="tp-val" data-v="blur"></span>
+            </div>
+            <div class="tp-field">
+              <span>整体缩放</span>
+              <input type="range" data-k="fontScale" min="0.7" max="1.6" step="0.05" />
+              <span class="tp-val" data-v="fontScale"></span>
+            </div>
+          </div>
+        </div>
+
+        <div class="tp-group" data-group="more">
+          <button class="tp-group-head" type="button">
+            <span>更多功能</span>
+            <span class="tp-caret">▶</span>
+          </button>
+          <div class="tp-group-body">
+            <div class="tp-row" style="padding-left:0;padding-right:0;">
+              <div class="tp-label">点击单词查词</div>
+              <label class="tp-switch"><input type="checkbox" data-k="clickWord" /><span class="tp-slider"></span></label>
+            </div>
+            <div class="tp-row" style="padding-left:0;padding-right:0;">
+              <div class="tp-label">显示悬浮按钮</div>
+              <label class="tp-switch"><input type="checkbox" data-k="showLauncher" /><span class="tp-slider"></span></label>
+            </div>
+            <div class="tp-field">
+              <span>字幕位置</span>
+              <input type="range" data-k="position" min="4" max="40" step="1" />
+              <span class="tp-val" data-v="position"></span>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="tp-actions">
+        <button class="tp-btn" type="button" data-act="reset-pos">恢复居中</button>
+        <button class="tp-btn tp-primary" type="button" data-act="wordbook">生词本</button>
+      </div>`;
+    document.documentElement.appendChild(panelEl);
+
+    panelEl.querySelector('.tp-close').addEventListener('click', () => togglePanel(false));
+
+    // 折叠分组
+    panelEl.querySelectorAll('.tp-group-head').forEach((h) => {
+      h.addEventListener('click', () => h.closest('.tp-group').classList.toggle('tp-open'));
+    });
+
+    // 输入项统一走 patchSettings，实时生效（不重译）
+    panelEl.querySelectorAll('[data-k]').forEach((el) => {
+      const k = el.dataset.k;
+      const ev = el.type === 'range' || el.type === 'color' ? 'input' : 'change';
+      el.addEventListener(ev, () => {
+        let v;
+        if (el.type === 'checkbox') v = el.checked;
+        else if (el.type === 'range') v = Number(el.value);
+        else if (el.type === 'color') v = el.value;
+        else v = el.value;
+        // 语言/引擎变更必须重译，其余只改样式
+        const retranslate = k === 'targetLang' || k === 'engine' || k === 'sourceLang';
+        patchSettings({ [k]: v }, retranslate);
+        updateValLabel(k, v);
+      });
+    });
+
+    panelEl.querySelector('[data-act="reset-pos"]').addEventListener('click', () => {
+      patchSettings({ freePos: null });
+    });
+    panelEl.querySelector('[data-act="wordbook"]').addEventListener('click', () => {
+      try {
+        chrome.runtime.sendMessage({ type: 'open-wordbook' });
+      } catch (_) {
+        /* 忽略 */
+      }
+    });
+  }
+
+  /** 把设置值写回面板控件（打开面板时同步一次） */
+  function syncPanelUI() {
+    if (!panelEl || !state.settings) return;
+    const s = state.settings;
+    panelEl.querySelectorAll('[data-k]').forEach((el) => {
+      const k = el.dataset.k;
+      const v = s[k];
+      if (v === undefined) return;
+      if (el.type === 'checkbox') el.checked = !!v;
+      else el.value = v;
+      updateValLabel(k, v);
+    });
+  }
+
+  function updateValLabel(k, v) {
+    if (!panelEl) return;
+    const lab = panelEl.querySelector(`.tp-val[data-v="${k}"]`);
+    if (!lab) return;
+    if (k === 'bgAlpha') lab.textContent = Math.round(Number(v) * 100) + '%';
+    else if (k === 'fontScale') lab.textContent = Number(v).toFixed(2).replace(/0$/, '');
+    else if (k === 'position') lab.textContent = v + '%';
+    else lab.textContent = String(v);
+  }
+
+  /** 面板改设置：先本地生效，再持久化，再广播给其它标签页 */
+  let patchTimer = null;
+  const patchPending = {};
+  function patchSettings(patch, retranslate = false) {
+    state.settings = { ...state.settings, ...patch };
+    applySettingsToOverlay();
+    if (state.active) renderActive(state.active);
+    if (retranslate) {
+      // 语言/引擎变了：旧译文作废，重新翻
+      state.sentences.forEach((s) => {
+        s.zh = '';
+      });
+      translateAll();
+    }
+    Object.assign(patchPending, patch);
+    clearTimeout(patchTimer);
+    patchTimer = setTimeout(async () => {
+      const p = { ...patchPending };
+      for (const k of Object.keys(patchPending)) delete patchPending[k];
+      try {
+        await chrome.runtime.sendMessage({ type: 'settings:set', patch: p });
+      } catch (_) {}
+    }, 220);
   }
 
   /**
@@ -164,6 +467,31 @@
     window.addEventListener('pointerup', onUp);
     window.addEventListener('pointercancel', onUp);
 
+    // ---- 手柄显隐：鼠标在字幕框上时显示，移开后稍等一会儿再隐藏 ----
+    // 为什么需要延迟：手柄在字幕框上方 20px 处，指针从框上移向手柄时会短暂
+    // 离开 .trace-sub-box，:hover 立即失效 → 手柄自己消失 → 永远抓不到。
+    // 用 320ms 宽限把这段空隙桥接起来，既不影响「不碰字幕就不显示」的观感。
+    let hideTimer = null;
+    const showHandle = () => {
+      clearTimeout(hideTimer);
+      hideTimer = null;
+      overlayEl.classList.add('trace-hot');
+    };
+    const scheduleHide = () => {
+      clearTimeout(hideTimer);
+      hideTimer = setTimeout(() => {
+        hideTimer = null;
+        if (!boxEl.classList.contains('trace-dragging')) overlayEl.classList.remove('trace-hot');
+      }, 320);
+    };
+    boxEl.addEventListener('pointerenter', showHandle);
+    boxEl.addEventListener('pointerleave', scheduleHide);
+    // 指针进到手柄上也要保持显示（手柄是 box 的子元素，但为稳妥再挂一次）
+    handleEl.addEventListener('pointerenter', showHandle);
+    handleEl.addEventListener('pointerleave', scheduleHide);
+    // 拖动期间强制保持，松手后再按指针位置决定
+    handleEl.addEventListener('pointerdown', () => showHandle());
+
     // 窗口尺寸变化时，重新夹紧中心点，避免字幕框跑到视口外
     window.addEventListener('resize', () => {
       if (!state.settings?.freePos || !boxEl) return;
@@ -190,10 +518,25 @@
     const s = state.settings;
     overlayEl.style.setProperty('--trace-font-scale', String(s.fontScale || 1));
     overlayEl.style.setProperty('--trace-bottom', (s.position ?? 18) + '%');
+    // 字幕样式（页内面板实时改）
+    overlayEl.style.setProperty('--trace-orig-size', (s.origSize ?? 28) + 'px');
+    overlayEl.style.setProperty('--trace-trans-size', (s.transSize ?? 21) + 'px');
+    overlayEl.style.setProperty('--trace-orig-color', s.origColor || '#ffffff');
+    overlayEl.style.setProperty('--trace-trans-color', s.transColor || '#ebebeb');
+    overlayEl.style.setProperty('--trace-alpha', String(s.bgAlpha ?? 0.55));
+    overlayEl.style.setProperty('--trace-radius', (s.radius ?? 12) + 'px');
+    overlayEl.style.setProperty('--trace-blur', (s.blur ?? 18) + 'px');
     overlayEl.dataset.mode = s.mode;
     overlayEl.classList.toggle('trace-hidden', !s.enabled);
     // 有保存的自由位置就进入自由模式，否则回到默认底部居中
     applyFreePosition(s.freePos || null);
+    // 悬浮按钮跟着开关键变灰
+    if (launcherEl) {
+      launcherEl.classList.toggle('trace-off', !s.enabled);
+      launcherEl.style.display = s.showLauncher === false ? 'none' : '';
+      positionLauncher();
+    }
+    syncPanelUI();
   }
 
   function renderActive(sentence) {
@@ -776,6 +1119,7 @@
       state.settings = {};
     }
     buildOverlay();
+    buildLauncher();
     applySettingsToOverlay();
     state.videoId = getVideoId();
     loadWordSet();

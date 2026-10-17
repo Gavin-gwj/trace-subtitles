@@ -138,6 +138,29 @@ CSS 类名体系（`edvideo.css`）暴露了它的结构：
 `native` 语言 = 翻译目标语言）。三种模式：`reader`（阅读模式）、`cinema`（影院沉浸）、
 `complex`（复杂布局）。字幕随 `video.currentTime` 高亮推进，单词可点出词典卡。
 
+**入口与设置面板**（对照真实截图确认）：Trancy 在播放器控制栏最右端（紧邻全屏按钮）
+放了一个紫色圆角方块图标，点击弹出**页内深色侧栏面板**，而不是浏览器工具栏的 popup。
+面板结构（自上而下）：
+
+```
+Trancy 字幕  ⓘ                      [开关]
+AI 字幕  ⓘ
+主字幕        English
+翻译字幕      中文
+AI 总结
+收藏视频
+翻译引擎      Google
+字幕显示      双语字幕
+字幕样式      ⋮      ← 点开才是字号/颜色/背景等细项
+键盘控制
+更多功能
+[学习模式 ⓘ] [旧版本]
+```
+
+这个设计的用意：用户在看视频时不该被迫离开画面去点工具栏图标 ——
+入口贴在播放器上、面板浮在画面上，调完即走。复刻版按这个思路实现（见下文
+「播放器右下角悬浮按钮」与「页内设置面板」）。
+
 ### 6. 完整数据流
 
 ```
@@ -259,7 +282,7 @@ store），同一个视频二次打开不再请求网络。
 - **广播不需要 `tabs` 权限**：`host_permissions` 已含 `youtube.com`，`chrome.tabs.query({url})`
   可以直接按 URL 过滤；申请 `tabs` 权限反而会触发"读取浏览记录"的安装警告。
 
-### 过程中修掉的五个真实 bug（值得记录）
+### 过程中修掉的六个真实 bug（值得记录）
 
 **bug 1：跨消息传函数。** `content.js` 曾把 `hash: S.hash` 放进 `chrome.runtime.sendMessage`，
 而消息经过结构化克隆会丢掉函数，SW 侧抛 `TypeError: hashFn is not a function`。
@@ -369,7 +392,7 @@ function clampCenterX(cx) {
 // 拖动时、以及 renderActive() 每次换句后都调一次
 ```
 
-回归测试 `tools/test-center.js` 实测：短句 879px / 长句 1232px，两者中心都是 620px，
+回归测试 `tools/test-center.js` 实测：短句 762px / 长句 1232px，两者中心都是 620px，
 `driftPx: 0`；拖到最左边时 `leftEdge: 4`，正确被夹在视口内。
 
 > 顺带记一个**测试台自身的坑**：早期用
@@ -378,6 +401,38 @@ function clampCenterX(cx) {
 > `currentTime`（mock 里没有真实媒体，恒为 0），导致字幕永远停在第 1 句、
 > 所有"换句"断言其实都没生效。改用 `canvas.captureStream(25)` 喂给 `video`
 > 后两个世界才共享同一条真实时间轴。教训：**跨世界伪造 DOM 属性是无效的**。
+
+**bug 6：拖动手柄"一碰就消失"，永远抓不到。**
+
+现象：把手柄改成"鼠标移到字幕上才显示"之后，鼠标往上移去抓手柄，手柄立刻消失了。
+
+根因：手柄是 `.trace-sub-box` 的子元素，但**定位在框外**（`top:-20px`）。
+指针从框上移向手柄时会先离开框 → `:hover` 失效 → 手柄自己 `visibility:hidden` →
+指针还没碰到它就已经不可点。
+
+修复分两步：
+1. CSS 上让手柄下沿**压住框顶 2px**，把两者的悬停区域连成一片；
+2. JS 上加 **320ms 宽限延迟**桥接空隙 —— 离开框后不立即隐藏，
+   期间如果指针进到手柄上就取消隐藏：
+
+```js
+const scheduleHide = () => {
+  clearTimeout(hideTimer);
+  hideTimer = setTimeout(() => {
+    if (!boxEl.classList.contains('trace-dragging')) overlayEl.classList.remove('trace-hot');
+  }, 320);
+};
+boxEl.addEventListener('pointerenter', showHandle);
+boxEl.addEventListener('pointerleave', scheduleHide);
+handleEl.addEventListener('pointerenter', showHandle);   // 进了手柄就保持
+```
+
+CSS 侧对应 `.trace-sub-box:hover` 之外再加 `#trace-sub-overlay.trace-hot` 这个 JS 控制类。
+`tools/test-ui.js` 断言三态：静止 `opacity:0/visibility:hidden/pointer-events:none`、
+悬停 `opacity:1/visibility:visible/pointer-events:auto`、移开后重新归零。
+
+> 这里也有个测试时序坑：类名在 320ms 移除，但 `opacity .16s` 过渡还要 160ms，
+> 采样点必须 ≥800ms 才拿到终态；早期用 400ms 采样读到中间值导致误报 FAIL。
 
 ---
 
@@ -396,11 +451,19 @@ function clampCenterX(cx) {
 - **显示模式**：双语 / 仅译文 / 仅原文
 - **目标语言**：简体中文、繁体中文、日、韩、英、法、德、西、俄、葡（10 种）
 - **翻译引擎**：Google（推荐，快）/ MyMemory（备用）
-- **字号、字幕位置**：popup 里实时调
+- **字号、字幕位置**：popup 或**页内面板**里实时调
 - **毛玻璃字幕框**：深色半透明底 + `backdrop-filter: blur(18px)`，透出画面纹理而不是死黑板
+- **播放器右下角悬浮按钮**：一个渐变紫的「T」方块贴在播放器右下角内侧，点击弹出**页内设置面板**
+  （全屏、网页全屏、改窗口大小都会跟着贴边；可在面板里关掉）
+- **页内设置面板**：深色侧栏，结构对齐 Trancy 的「Trancy 字幕」菜单 —— 启用开关、主字幕语言、
+  翻译字幕语言、翻译引擎、字幕显示模式，加上可折叠的「字幕样式」与「更多功能」分组
+- **字幕样式实时调节**：原文字号 / 译文字号 / 原文颜色 / 译文颜色 / 背景不透明度 / 圆角 /
+  高斯模糊 / 整体缩放，8 项全部即时生效并持久化
 - **自由拖动**：鼠标移到字幕框上，顶部浮出黑色胶囊（3 个白点）→ 按住即可拖到任意位置；
+  **不碰字幕时手柄完全不显示**（`opacity:0` + `visibility:hidden` + `pointer-events:none`），
+  移开鼠标后约 0.5s 淡出，绝不干扰画面；
   **拖动后按"中心点"定位**，句子变长变短都从中心向两侧对称伸缩，不会左右横跳；
-  位置自动记住，换视频/刷新都保持；popup 里「恢复居中」可回到默认底部位置
+  位置自动记住，换视频/刷新都保持；面板或 popup 里「恢复居中」可回到默认底部位置
 - **点击查词**：点字幕里任意单词 → 音标 + 中文释义 + 英文释义 + 例句
 - **生词本**：一键加入，记录单词/释义/**所在句子与译文**/视频标题/时间点，可搜索、删除、
   导出 JSON，点击条目跳回原视频那一秒
@@ -424,6 +487,7 @@ npm i                        # 安装 playwright
 node test-mock.js            # 基础链路 + 查词 + 生词本 + 高亮，输出 PASS/FAIL + shot-mock.png
 node test-pot.js             # pot 签名回归测试 + 截图 shot-pot.png
 node test-center.js          # 拖动后按中心点定位（长短句不左右跳）+ 截图 shot-center.png
+node test-ui.js              # 手柄悬停显隐 + 悬浮按钮 + 页内面板 + 字幕样式，截图 shot-ui*.png
 ```
 
 `tools/mock/` 用 Playwright `page.route()` 整体伪造 `https://www.youtube.com/**`，
@@ -458,14 +522,32 @@ timedtext hits: [{ hasPot: true, pot: "MOCK_POT_TOKEN" }]
 RESULT: PASS (网络钩子成功绕过 pot 限制)
 ```
 
-居中回归（拖动后短句 879px / 长句 1232px，中心完全不动）：
+居中回归（拖动后短句 762px / 长句 1232px，中心完全不动）：
 
 ```
-centerAfterDrag: 760   followsCursor: true
+targetX: 760  expectClamped: 660  centerAfterDrag: 660  followsCursor: true
 leftEdgeAfterClamp: 4  leftCenterAfterClamp: 620  clampedInside: true
-shortWidth: 879   longWidth: 1232
+shortWidth: 762   longWidth: 1232
 shortCenter: 620  longCenter: 620   driftPx: 0
 RESULT: PASS（中心不漂移 + 跟随鼠标 + 不溢出视口 + 至少两句不同长度）
+```
+
+`expectClamped` 这个字段值得说明：拖动那一刻显示的是最长句（1232px），
+`clampCenterX` 会把中心夹到 `1280 - 1232/2 - 4 = 660`，所以目标 760 会被正确夹紧。
+测试早期硬编码"期望 760"导致误报失败，现在按当时框宽动态计算期望值。
+
+UI 回归（手柄悬停显隐 + 悬浮按钮 + 页内面板 + 字幕样式）：
+
+```
+handle:   idle {opacity:0, visibility:hidden, pointerEvents:none}
+          hover{opacity:1, visibility:visible, pointerEvents:auto}
+          afterLeave {opacity:0}
+launcher: {present:true, rect:{x:1234,y:848,w:34,h:34}, player:{right:1280,bottom:900}, insidePlayer:true}
+panel:    {visible:true, w:306, groups:["字幕样式","更多功能"], hasStyleControls:true}
+style:    before {origFontPx:28, transFontPx:21, boxRadius:"12px", boxBg:"rgba(38,38,40,0.55)"}
+          after  {origFontPx:40, transFontPx:30, boxRadius:"24px", boxBg:"rgba(38,38,40,0.9)"}
+persisted:{origSize:40, transSize:30, bgAlpha:0.9, radius:24}
+RESULT: PASS
 ```
 
 ---
@@ -490,12 +572,15 @@ D:\MyFiles\项目\Trace\
    ├─ test-mock.js              端到端自动化测试（字幕/查词/生词本/高亮）
    ├─ test-pot.js               pot 签名回归测试
    ├─ test-center.js            拖动后中心点定位回归测试
+   ├─ test-ui.js                手柄显隐 + 悬浮按钮 + 页内面板 + 字幕样式回归测试
    ├─ probe-ext2\               主世界 vs 隔离世界对照实验
    ├─ probe-transcript.js       get_transcript 接口探针
    ├─ gen-icons.js              纯 Node 生成 PNG 图标
    ├─ shot-mock.png             验证截图（高亮 + 查词卡）
    ├─ shot-pot.png              pot 模式验证截图
    ├─ shot-center.png           居中验证截图
+   ├─ shot-ui.png               悬浮按钮 + 放大字号截图
+   ├─ shot-ui-panel.png         页内设置面板展开截图
    └─ shot-glass.png            毛玻璃 + 3 点拖动胶囊截图
 ```
 

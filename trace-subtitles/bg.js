@@ -20,6 +20,15 @@ const DEFAULT_SETTINGS = {
   engine: 'google',
   autoHideNative: true,
   clickWord: true,
+  // ---- 字幕样式（页内设置面板可实时调整）----
+  origSize: 28, // 原文字号 px
+  transSize: 21, // 译文字号 px
+  origColor: '#ffffff',
+  transColor: '#ebebeb',
+  bgAlpha: 0.55, // 背景不透明度 0~0.95
+  radius: 12, // 圆角 px
+  blur: 18, // 高斯模糊 px
+  showLauncher: true, // 播放器右下角悬浮按钮
 };
 
 // ---------------------------------------------------------------- 网络工具
@@ -588,6 +597,21 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         case 'cache:clear':
           await idbClear('translations');
           sendResponse({ ok: true });
+          break;
+        case 'open-wordbook':
+          // 页内面板的「生词本」按钮：优先弹扩展 popup（需要 Chrome 127+ 且通常要用户手势）；
+          // 失败就退化成新标签页打开 popup.html —— 功能一致，只是不在角标里
+          try {
+            await chrome.action.openPopup();
+            sendResponse({ ok: true, via: 'popup' });
+          } catch (e) {
+            try {
+              await chrome.tabs.create({ url: chrome.runtime.getURL('popup.html') });
+              sendResponse({ ok: true, via: 'tab' });
+            } catch (e2) {
+              sendResponse({ ok: false, error: String((e2 && e2.message) || e2) });
+            }
+          }
           break;
         default:
           sendResponse({ ok: false, error: 'unknown message: ' + msg.type });

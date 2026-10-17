@@ -7,6 +7,10 @@
   --trace-radius: 12px;
   --trace-blur: 18px;
   --trace-alpha: .55;
+  --trace-orig-size: 28px;
+  --trace-trans-size: 21px;
+  --trace-orig-color: #ffffff;
+  --trace-trans-color: #ebebeb;
   position: fixed;
   inset: 0;
   pointer-events: none;
@@ -54,14 +58,17 @@
 
 /* ------------------------------------------------------------ 拖动手柄 */
 
-/* 黑色胶囊 + 3 个白点，悬停时才显形，避免挡字幕 */
+/* 黑色胶囊 + 3 个白点。默认完全透明且不接收指针事件，
+   只有鼠标移到字幕框上才淡入 —— 不悬停时绝不干扰画面。 */
 #trace-sub-overlay .trace-drag-handle {
   position: absolute;
-  top: -24px;
+  /* 下沿压住字幕框顶部 2px，让「框 → 手柄」的悬停区域连成一片，
+     鼠标上移去抓手柄时不会在缝隙里丢失 hover 导致手柄闪没 */
+  top: -20px;
   left: 50%;
   transform: translateX(-50%);
   width: 60px;
-  height: 18px;
+  height: 22px;
   border-radius: 9px;
   background: rgba(14, 14, 16, .94);
   display: flex;
@@ -69,15 +76,23 @@
   justify-content: center;
   gap: 5px;
   cursor: grab;
-  opacity: .55;
-  transition: opacity .18s ease, background-color .15s ease;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition: opacity .16s ease, visibility .16s ease, background-color .15s ease;
   box-shadow: 0 2px 8px rgba(0, 0, 0, .45);
-  pointer-events: auto;
   touch-action: none;
 }
+/* 悬停在字幕框上，或正在拖动 → 显形。
+   注意还依赖 JS 加的 .trace-hot 类：手柄在框的上方，鼠标从框移向手柄时会先
+   离开框（hover 断掉），JS 用 ~320ms 的宽限延迟桥接这段空隙，
+   否则手柄会在指针到达前自己消失，永远抓不到。 */
+#trace-sub-overlay.trace-hot .trace-drag-handle,
 #trace-sub-overlay .trace-sub-box:hover .trace-drag-handle,
 #trace-sub-overlay .trace-sub-box.trace-dragging .trace-drag-handle {
   opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
 }
 #trace-sub-overlay .trace-drag-handle:hover {
   background: rgba(44, 44, 48, .98);
@@ -94,9 +109,9 @@
 }
 
 #trace-sub-overlay .trace-sub-orig {
-  font-size: calc(28px * var(--trace-font-scale));
+  font-size: calc(var(--trace-orig-size) * var(--trace-font-scale));
   line-height: 1.34;
-  color: #fff;
+  color: var(--trace-orig-color);
   font-weight: 600;
   letter-spacing: .1px;
   text-shadow: 0 1px 3px rgba(0, 0, 0, .75);
@@ -105,9 +120,9 @@
 
 #trace-sub-overlay .trace-sub-trans {
   margin-top: 7px;
-  font-size: calc(21px * var(--trace-font-scale));
+  font-size: calc(var(--trace-trans-size) * var(--trace-font-scale));
   line-height: 1.45;
-  color: rgba(255, 255, 255, .92);
+  color: var(--trace-trans-color);
   font-weight: 400;
   text-shadow: 0 1px 3px rgba(0, 0, 0, .7);
   min-height: 1em;
@@ -255,4 +270,315 @@
 }
 #trace-word-popup .trace-pop-add.trace-done {
   background: #2e7d32;
+}
+
+/* ============================================================
+   播放器右下角悬浮按钮（Trancy 风格）
+   ============================================================ */
+
+#trace-launcher {
+  position: fixed;
+  z-index: 2147483002;
+  width: 34px;
+  height: 34px;
+  border-radius: 9px;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(135deg, #4c8dff, #7c4dff);
+  color: #fff;
+  font: 700 15px/1 "Roboto", sans-serif;
+  box-shadow: 0 3px 12px rgba(0, 0, 0, .45);
+  opacity: .82;
+  transition: opacity .16s ease, transform .16s ease, box-shadow .16s ease;
+  pointer-events: auto;
+}
+#trace-launcher:hover {
+  opacity: 1;
+  transform: scale(1.07);
+  box-shadow: 0 5px 18px rgba(0, 0, 0, .55);
+}
+#trace-launcher.trace-off {
+  background: linear-gradient(135deg, #6b6b70, #4a4a50);
+  opacity: .7;
+}
+#trace-launcher .trace-badge {
+  position: absolute;
+  top: -3px;
+  right: -3px;
+  min-width: 15px;
+  height: 15px;
+  border-radius: 8px;
+  background: #e53935;
+  color: #fff;
+  font: 700 9px/15px "Roboto", sans-serif;
+  text-align: center;
+  padding: 0 3px;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, .4);
+}
+
+/* ============================================================
+   页内设置面板（Trancy 风格深色侧栏）
+   ============================================================ */
+
+#trace-panel {
+  position: fixed;
+  z-index: 2147483003;
+  top: 12px;
+  right: 12px;
+  width: 306px;
+  max-height: calc(100vh - 24px);
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  background: rgba(24, 24, 27, .97);
+  backdrop-filter: blur(20px) saturate(140%);
+  -webkit-backdrop-filter: blur(20px) saturate(140%);
+  color: #e9e9ec;
+  border-radius: 14px;
+  box-shadow: 0 18px 60px rgba(0, 0, 0, .6), 0 0 0 1px rgba(255, 255, 255, .07);
+  font: 13px/1.5 "Roboto", "PingFang SC", "Microsoft YaHei", sans-serif;
+  overflow: hidden;
+  pointer-events: auto;
+  animation: trace-panel-in .18s ease;
+}
+#trace-panel.trace-hidden {
+  display: none;
+}
+@keyframes trace-panel-in {
+  from { opacity: 0; transform: translateX(10px); }
+  to { opacity: 1; transform: none; }
+}
+
+#trace-panel .tp-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 14px;
+  border-bottom: 1px solid rgba(255, 255, 255, .08);
+  flex: none;
+}
+#trace-panel .tp-logo {
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  background: linear-gradient(135deg, #4c8dff, #7c4dff);
+  color: #fff;
+  font: 700 12px/22px "Roboto", sans-serif;
+  text-align: center;
+  flex: none;
+}
+#trace-panel .tp-title {
+  font-weight: 700;
+  font-size: 13.5px;
+}
+#trace-panel .tp-close {
+  margin-left: auto;
+  border: none;
+  background: transparent;
+  color: #9a9aa2;
+  font-size: 19px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 2px;
+  flex: none;
+}
+#trace-panel .tp-close:hover {
+  color: #fff;
+}
+
+#trace-panel .tp-body {
+  padding: 4px 0 8px;
+  overflow-y: auto;
+  flex: 1 1 auto;
+}
+#trace-panel .tp-body::-webkit-scrollbar {
+  width: 6px;
+}
+#trace-panel .tp-body::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, .18);
+  border-radius: 3px;
+}
+
+#trace-panel .tp-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 14px;
+  border-bottom: 1px solid rgba(255, 255, 255, .055);
+}
+#trace-panel .tp-row:last-child {
+  border-bottom: none;
+}
+#trace-panel .tp-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: #d7d7dd;
+}
+#trace-panel .tp-sub {
+  display: block;
+  color: #86868f;
+  font-size: 11px;
+  margin-top: 1px;
+}
+
+#trace-panel select {
+  background: rgba(255, 255, 255, .08);
+  color: #e9e9ec;
+  border: 1px solid rgba(255, 255, 255, .12);
+  border-radius: 7px;
+  padding: 4px 6px;
+  font-size: 12px;
+  max-width: 128px;
+  outline: none;
+  cursor: pointer;
+}
+#trace-panel select option {
+  background: #232327;
+  color: #e9e9ec;
+}
+
+/* 开关 */
+#trace-panel .tp-switch {
+  position: relative;
+  width: 38px;
+  height: 21px;
+  flex: none;
+  cursor: pointer;
+}
+#trace-panel .tp-switch input {
+  opacity: 0;
+  width: 0;
+  height: 0;
+  position: absolute;
+}
+#trace-panel .tp-slider {
+  position: absolute;
+  inset: 0;
+  background: #4a4a52;
+  border-radius: 999px;
+  transition: .18s;
+}
+#trace-panel .tp-slider::before {
+  content: "";
+  position: absolute;
+  width: 17px;
+  height: 17px;
+  left: 2px;
+  top: 2px;
+  background: #fff;
+  border-radius: 50%;
+  transition: .18s;
+}
+#trace-panel .tp-switch input:checked + .tp-slider {
+  background: #f5a623;
+}
+#trace-panel .tp-switch input:checked + .tp-slider::before {
+  transform: translateX(17px);
+}
+
+/* 可折叠分组 */
+#trace-panel .tp-group {
+  border-bottom: 1px solid rgba(255, 255, 255, .055);
+}
+#trace-panel .tp-group-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 9px 14px;
+  border: none;
+  background: transparent;
+  color: #d7d7dd;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+#trace-panel .tp-group-head:hover {
+  background: rgba(255, 255, 255, .04);
+}
+#trace-panel .tp-group-head .tp-caret {
+  margin-left: auto;
+  color: #86868f;
+  font-size: 11px;
+  transition: transform .16s ease;
+}
+#trace-panel .tp-group.tp-open .tp-group-head .tp-caret {
+  transform: rotate(90deg);
+}
+#trace-panel .tp-group-body {
+  display: none;
+  padding: 2px 14px 10px;
+}
+#trace-panel .tp-group.tp-open .tp-group-body {
+  display: block;
+}
+
+#trace-panel .tp-field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 0;
+}
+#trace-panel .tp-field > span {
+  flex: none;
+  width: 74px;
+  color: #a5a5ae;
+  font-size: 12px;
+}
+#trace-panel .tp-field input[type="range"] {
+  flex: 1 1 auto;
+  min-width: 0;
+  accent-color: #7c8dff;
+}
+#trace-panel .tp-field .tp-val {
+  flex: none;
+  width: 34px;
+  text-align: right;
+  color: #86868f;
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+}
+#trace-panel .tp-field input[type="color"] {
+  flex: none;
+  width: 34px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid rgba(255, 255, 255, .16);
+  border-radius: 6px;
+  background: transparent;
+  cursor: pointer;
+}
+
+#trace-panel .tp-actions {
+  display: flex;
+  gap: 8px;
+  padding: 10px 14px 12px;
+  border-top: 1px solid rgba(255, 255, 255, .08);
+  flex: none;
+}
+#trace-panel .tp-btn {
+  flex: 1 1 0;
+  padding: 7px 0;
+  border: 1px solid rgba(255, 255, 255, .14);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, .06);
+  color: #e9e9ec;
+  font-size: 12px;
+  cursor: pointer;
+  transition: background .15s ease;
+}
+#trace-panel .tp-btn:hover {
+  background: rgba(255, 255, 255, .13);
+}
+#trace-panel .tp-btn.tp-primary {
+  background: linear-gradient(135deg, #4c8dff, #7c4dff);
+  border-color: transparent;
+  font-weight: 600;
+}
+#trace-panel .tp-btn.tp-primary:hover {
+  filter: brightness(1.1);
 }
