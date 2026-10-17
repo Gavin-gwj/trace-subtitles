@@ -73,6 +73,13 @@ function pageHtml(videoId = VIDEO_ID, opts = {}) {
   // potMode: 模拟新版 YouTube —— 没有 pot 签名的 timedtext 请求返回 200 + 空 body，
   // 只有页面自己发出的带 pot 请求才有内容。用于回归测试「网络钩子」路径。
   const potMode = !!opts.potMode;
+  // frame: 模拟「非全屏」时播放器只是页面里的一块矩形（上方顶栏、右侧推荐栏）。
+  // 不给就是铺满视口（旧行为）。测试用它验证字幕贴的是视频框而不是视口。
+  const frame = opts.frame || null;
+  const frameCss = frame
+    ? `--mp-left:${frame.left}px; --mp-top:${frame.top}px;
+       --mp-w:${frame.width}px; --mp-h:${frame.height}px;`
+    : `--mp-left:0px; --mp-top:0px; --mp-w:100vw; --mp-h:100vh;`;
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -81,9 +88,11 @@ function pageHtml(videoId = VIDEO_ID, opts = {}) {
 <style>
   html,body { margin:0; padding:0; background:#0f0f0f; color:#fff;
     font-family:Roboto,Arial,sans-serif; overflow:hidden; }
-  /* 铺满视口，模拟真实 YouTube 剧场模式，这样字幕框是压在画面上而不是页面空白上 */
-  #movie_player { position:fixed; inset:0; width:100vw; height:100vh; margin:0;
-    background:#000; overflow:hidden; }
+  /* 播放器默认铺满视口（模拟真实 YouTube 剧场模式）；给了 frame 就变成一块矩形 */
+  #movie_player { position:fixed; left:var(--mp-left); top:var(--mp-top);
+    width:var(--mp-w); height:var(--mp-h); margin:0;
+    background:#000; overflow:hidden; ${frameCss} }
+  #movie_player.ytp-fullscreen { left:0; top:0; width:100vw; height:100vh; }
   #movie_player video { position:absolute; inset:0; width:100%; height:100%;
     object-fit:contain; background:#000; }
   #movie_player canvas { position:absolute; inset:0; width:100%; height:100%; }
@@ -166,6 +175,12 @@ function pageHtml(videoId = VIDEO_ID, opts = {}) {
     window.__mockPause = () => v.pause();
     window.__mockPlay = () => v.play().catch(() => {});
     window.__mockReady = true;
+
+    // ---- 模拟全屏 / 退出全屏（YouTube 的做法：给播放器加 .ytp-fullscreen）----
+    window.__mockFullscreen = (on) => {
+      player.classList.toggle('ytp-fullscreen', !!on);
+      return player.getBoundingClientRect();
+    };
   })();
 </script>
 </body>

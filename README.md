@@ -566,6 +566,98 @@ function syncPanelLayout() {
 补上 `- 52px` 后实测 `boxLeft: 12, boxRight: 918, panelLeft: 944, overlapPx: -26`，
 两边都有余量。断言也补了 `boxLeft >= 0`，防止这个溢出回归。
 
+**bug 11：字幕贴在浏览器窗口上，而不是视频画面上。**
+
+现象：普通（非全屏）模式下，YouTube 播放器只是页面里的一块矩形 —— 上方有顶栏、右侧有推荐栏、
+影院模式下左右还有黑边。但字幕覆盖层是 `position: fixed; inset: 0`，贴的是**整个视口**，
+于是字幕会浮在画面之外的空白/黑边上，看起来像"飘在网页上"而不是"压在视频里"。
+进全屏时也没有等比放大：字号写死 28px，画面放大到 1920 宽后字幕显得很小。
+
+根因：`inset: 0` 把覆盖层的坐标系绑到了视口，而所有百分比（`bottom: 18%`、`max-width: 94%`）
+都是相对这个视口算的。视频框的位置和尺寸变化（全屏、影院模式、顶栏折叠、窗口缩放）
+对覆盖层完全不可见。
+
+修复：把覆盖层从"贴视口"改成"贴视频框"，并把位置/尺寸交给 JS 实时写入：
+
+```js
+function overlayGeom() {
+  const mp = document.getElementById('movie_player');
+  const r = (mp || getVideo())?.getBoundingClientRect?.();
+  if (r && r.width > 80 && r.height > 60) return { left: r.left, top: r.top, width: r.width, height: r.height };
+  return { left: 0, top: 0, width: window.innerWidth, height: window.innerHeight };  // 兜底
+}
+
+function isFullscreen() {
+  if (document.fullscreenElement) return true;
+  const mp = document.getElementById('movie_player');
+  return !!mp && mp.classList.contains('ytp-fullscreen');   // YouTube 的做法
+}
+
+function applyOverlayFrame() {
+  const g = overlayGeom();
+  const fs = isFullscreen();
+  let scale = 1;
+  if (!fs) {
+    baseFrameWidth = g.width;          // 非全屏时持续刷新基准
+  } else {
+    const base = baseFrameWidth || g.width;
+    scale = Math.max(1, Math.min(g.width / base, 2.8));   // 全屏按宽度比放大
+  }
+  const reserve = panelReservePx();     // 面板打开时右侧让位
+  const key = [g.left, g.top, g.width, g.height, scale.toFixed(3), reserve].join(',');
+  if (key === lastGeomKey) return;      // 几何签名去重，没变化就只做一次字符串比较
+  lastGeomKey = key;
+  overlayEl.style.left = g.left + 'px';  overlayEl.style.top = g.top + 'px';
+  overlayEl.style.width = g.width + 'px'; overlayEl.style.height = g.height + 'px';
+  overlayEl.style.setProperty('--trace-vscale', scale.toFixed(3));
+  overlayEl.style.setProperty('--trace-panel-reserve', reserve + 'px');
+  overlayEl.classList.toggle('trace-panel-open', isPanelOpen());
+  if (state.settings?.freePos && boxEl) reapplyFreePos();
+}
+```
+
+CSS 侧只要把字号和行宽都乘上 `--trace-vscale` 就够了：
+
+```css
+#trace-sub-overlay .trace-sub-orig  { font-size: calc(var(--trace-orig-size)  * var(--trace-font-scale) * var(--trace-vscale)); }
+#trace-sub-overlay .trace-sub-trans { font-size: calc(var(--trace-trans-size) * var(--trace-font-scale) * var(--trace-vscale)); }
+#trace-sub-overlay .trace-sub-box   { max-width: min(94%, calc(1180px * var(--trace-vscale))); }
+```
+
+**踩的坑一：缩放基准必须是"非全屏时的宽度"，不能写死 1280。**
+第一版用 `scale = rect.width / 1280`，结果窗口小一点（播放器 900 宽）字幕就缩到 0.7 倍、
+大屏（1600 宽）又涨到 1.25 倍 —— 用户拖一下窗口字幕就忽大忽小。
+改成在非全屏时不断记录 `baseFrameWidth = g.width`，全屏时算 `g.width / baseFrameWidth`，
+语义就精确对上需求："全屏后等比例放大，退出全屏后又等比例缩小"，非全屏时恒为 1。
+
+**踩的坑二：拖拽坐标要减掉视频框的左上角。**
+指针事件给的是视口坐标（`ev.clientX`），而覆盖层的坐标系现在是视频框的。
+不换算的话，播放器不在 (0,0) 时字幕会偏移一整个顶栏的距离。
+`onMove` 里改成 `clampCenterX(ev.clientX - drag.dx - g.left)` 与 `ev.clientY - drag.dy - g.top`。
+
+**踩的坑三：自由位置必须改存归一化比例。**
+原来存的是视口绝对像素 `{x, y}`。覆盖层改成贴视频框后，绝对像素在换窗口大小、
+进全屏、切影院模式时全部失效（字幕会跑到画面外）。改成 `{nx, ny}`（0~1 的比例），
+`applyFreePosition` 里乘回当前视频框尺寸；同时兼容旧数据 —— 见到没有 `nx` 的对象就按
+旧的视口像素处理一次。
+
+**踩的坑四：`max-width` 的上限也得缩放。**
+只放大字号不放大行宽上限，全屏时 1180px 的 `max-width` 会把长句挤成三行。
+`calc(1180px * var(--trace-vscale))` 之后，全屏实测行宽从 892px 展开到 1392px，长句仍是一行。
+
+**回归测试 `tools/test-frame.js`**（夹具新增 `opts.frame` 指定播放器矩形、`__mockFullscreen(on)`
+模拟 YouTube 加 `.ytp-fullscreen`）：1440×900 窗口 + 900×506 的播放器矩形，实测：
+
+```
+normal:     overlay {x:140, y:80, w:900, h:506}  == 视频框   vscale 1     fontPx 28
+fullscreen: overlay {x:0,   y:0,  w:1440, h:900} == 视口     vscale 1.6   fontPx 44.8
+back:       overlay {x:140, y:80, w:900, h:506}  == 视频框   vscale 1     fontPx 28
+RESULT: PASS（字幕贴视频框 + 全屏等比放大 + 退全屏等比缩回）
+```
+
+截图目视确认：非全屏时字幕完整落在偏左上的绿色画面内、下方还露出画面（CC 徽标与 T 按钮），
+全屏时字幕随画面一起铺开、字号明显变大，两种状态都没有越出画面。
+
 ### 界面重设计：从"能用"到"像产品"
 
 复刻完功能后，界面做了两轮视觉重构。核心决定是**放弃"每个页面各写一套 CSS"**，先抽出一套

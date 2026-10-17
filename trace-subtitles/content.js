@@ -15,9 +15,6 @@
   const S = window.TraceSubs;
   const REQ = '__TRACE_REQ__';
   const RES = '__TRACE_RES__';
-  // 页内面板占用的横向空间（面板 322px + 右侧 14px 间距 + 8px 余量），
-  // 与 overlay.css 里 .trace-panel-open 的 350px 内缩值保持一致
-  const PANEL_RESERVE = 350;
   const pending = new Map();
   let reqSeq = 0;
 
@@ -77,6 +74,10 @@
 
   let overlayEl, origEl, transEl, tipEl, popupEl, boxEl, handleEl;
   let launcherEl, panelEl;
+  /** 非全屏时记下的视频框宽度，作为「全屏等比例放大」的基准 */
+  let baseFrameWidth = 0;
+  /** 上次应用的覆盖层几何签名，避免每帧都写样式 */
+  let lastGeomKey = '';
 
   function buildOverlay() {
     if (overlayEl) return;
@@ -408,9 +409,99 @@
   }
 
   /**
+   * 视频框在视口里的位置与尺寸。
+   * 优先用 YouTube 的 #movie_player（它包含控制栏、比 video 元素略大），
+   * 拿不到就退回 video，再退回整个视口。
+   */
+  function overlayGeom() {
+    const mp = document.getElementById('movie_player');
+    const v = getVideo();
+    const el = mp || v;
+    const r = el?.getBoundingClientRect?.();
+    if (r && r.width > 80 && r.height > 60) {
+      return { left: r.left, top: r.top, width: r.width, height: r.height };
+    }
+    return { left: 0, top: 0, width: window.innerWidth, height: window.innerHeight };
+  }
+
+  /** 是否处于真·全屏（YouTube 会把 .ytp-fullscreen 加到播放器上） */
+  function isFullscreen() {
+    if (document.fullscreenElement) return true;
+    const mp = document.getElementById('movie_player');
+    return !!mp && mp.classList.contains('ytp-fullscreen');
+  }
+
+  /** 页内面板盖住了视频框右侧多少像素（覆盖层坐标系） */
+  function panelReservePx() {
+    if (!isPanelOpen() || !panelEl) return 0;
+    const g = overlayGeom();
+    const pr = panelEl.getBoundingClientRect();
+    const overlap = g.left + g.width - pr.left;
+    if (overlap <= 0) return 0;
+    return Math.min(g.width, Math.round(overlap + 8));
+  }
+
+  /**
+   * 让覆盖层精确贴合视频框，并按视频框宽度换算字号缩放。
+   *
+   * 为什么不是贴满视口：普通模式下 YouTube 播放器只是页面里的一块矩形
+   * （上方有顶栏、右侧有推荐栏），贴视口会让字幕跑到画面外的黑边上。
+   *
+   * 缩放基准 baseFrameWidth 在非全屏时持续更新，所以：
+   *   非全屏 → 比例恒为 1（拖窗口不会让字幕忽大忽小）
+   *   全屏   → 按 当前宽度/非全屏宽度 放大（1080p 全屏约 1.6~1.8 倍）
+   *   退全屏 → 比例回到 1，字号等比例缩回
+   */
+  function applyOverlayFrame() {
+    if (!overlayEl) return;
+    const g = overlayGeom();
+    const fs = isFullscreen();
+    let scale = 1;
+    if (!fs) {
+      baseFrameWidth = g.width;
+    } else {
+      const base = baseFrameWidth || g.width;
+      scale = Math.max(1, Math.min(g.width / base, 2.8));
+    }
+    const reserve = panelReservePx();
+    const key = [
+      Math.round(g.left), Math.round(g.top), Math.round(g.width), Math.round(g.height),
+      scale.toFixed(3), reserve,
+    ].join(',');
+    if (key === lastGeomKey) return;
+    lastGeomKey = key;
+
+    overlayEl.style.left = Math.round(g.left) + 'px';
+    overlayEl.style.top = Math.round(g.top) + 'px';
+    overlayEl.style.width = Math.round(g.width) + 'px';
+    overlayEl.style.height = Math.round(g.height) + 'px';
+    overlayEl.style.setProperty('--trace-vscale', scale.toFixed(3));
+    overlayEl.style.setProperty('--trace-panel-reserve', reserve + 'px');
+    overlayEl.classList.toggle('trace-panel-open', isPanelOpen());
+
+    // 视频框变形后，自由模式下的位置要重新夹紧（否则可能落到画面外）
+    if (state.settings?.freePos && boxEl) {
+      reapplyFreePos();
+    }
+  }
+
+  /** 按当前保存的位置重新摆一次字幕框（拖动、换句、视频框变化后调用） */
+  function reapplyFreePos() {
+    if (!boxEl) return;
+    const g = overlayGeom();
+    const cx = parseFloat(boxEl.style.left);
+    const cy = parseFloat(boxEl.style.top);
+    boxEl.style.left = clampCenterX(Number.isFinite(cx) ? cx : g.width / 2) + 'px';
+    const h = boxEl.offsetHeight || 0;
+    const y = Number.isFinite(cy) ? cy : g.height * 0.8;
+    boxEl.style.top = Math.round(Math.max(4, Math.min(y, Math.max(4, g.height - h - 4)))) + 'px';
+  }
+
+  /**
    * 把保存的自由位置应用到字幕框。
-   * pos.x 存的是**字幕框水平中心**（不是左边缘），配合 CSS 的 translateX(-50%)，
-   * 句子变长变短时框会向两侧对称伸缩，视觉上始终居中于拖动点。
+   * 位置按**覆盖层（=视频框）的归一化比例**保存（nx/ny，0~1），
+   * 这样换窗口大小、进全屏、切影院模式都不会跑位。
+   * 兼容早期版本存的绝对像素 {x, y}（那时覆盖层还等于视口）。
    */
   function applyFreePosition(pos) {
     if (!boxEl) return;
@@ -421,16 +512,28 @@
       return;
     }
     overlayEl.dataset.free = '1';
-    boxEl.style.left = clampCenterX(pos.x) + 'px';
-    boxEl.style.top = pos.y + 'px';
+    const g = overlayGeom();
+    let cx, cy;
+    if (Number.isFinite(pos.nx)) {
+      cx = pos.nx * g.width;
+      cy = (Number.isFinite(pos.ny) ? pos.ny : 0.8) * g.height;
+    } else {
+      // 旧数据：视口绝对像素
+      cx = Number.isFinite(pos.x) ? pos.x : g.width / 2;
+      cy = Number.isFinite(pos.y) ? pos.y : g.height * 0.8;
+    }
+    boxEl.style.left = clampCenterX(cx) + 'px';
+    const h = boxEl.offsetHeight || 0;
+    boxEl.style.top = Math.round(Math.max(4, Math.min(cy, Math.max(4, g.height - h - 4)))) + 'px';
   }
 
-  /** 把中心 x 限制在视口内，保证整块字幕都看得见 */
+  /** 把中心 x 限制在视频框内，保证整块字幕都看得见 */
   function clampCenterX(cx) {
+    const g = overlayGeom();
     const half = (boxEl?.offsetWidth || 0) / 2;
     const min = half + 4;
     // 面板打开时右边界要缩到面板左侧，否则字幕会被面板盖住一截
-    const rightEdge = window.innerWidth - (isPanelOpen() ? PANEL_RESERVE : 0);
+    const rightEdge = g.width - panelReservePx();
     const max = rightEdge - half - 4;
     if (max < min) return rightEdge / 2;
     return Math.round(Math.max(min, Math.min(cx, max)));
@@ -442,19 +545,17 @@
   }
 
   /**
-   * 面板开合时同步给覆盖层加 .trace-panel-open（CSS 里据此收窄字幕），
+   * 面板开合时重算覆盖层几何（CSS 里据 --trace-panel-reserve 收窄字幕），
    * 并重新夹紧自由模式下的中心点，避免字幕被面板压住。
    */
   function syncPanelLayout() {
     if (!overlayEl) return;
-    overlayEl.classList.toggle('trace-panel-open', isPanelOpen());
-    if (state.settings?.freePos && boxEl) {
-      const cx = parseFloat(boxEl.style.left) || window.innerWidth / 2;
-      boxEl.style.left = clampCenterX(cx) + 'px';
-    }
+    lastGeomKey = '';
+    applyOverlayFrame();
+    if (state.settings?.freePos && boxEl) reapplyFreePos();
   }
 
-  /** 拖拽：按住顶部手柄移动字幕框，位置持久化（记录的是框的中心点） */
+  /** 拖拽：按住顶部手柄移动字幕框，位置持久化（归一化到视频框，记录的是框的中心点） */
   function initDrag() {
     let drag = null;
 
@@ -472,22 +573,29 @@
     const onMove = (ev) => {
       if (!drag) return;
       ev.preventDefault();
+      const g = overlayGeom();
       const h = boxEl.offsetHeight || 0;
-      const cx = clampCenterX(ev.clientX - drag.dx);
-      const maxY = window.innerHeight - h - 4;
-      const y = Math.max(4, Math.min(ev.clientY - drag.dy, Math.max(4, maxY)));
-      applyFreePosition({ x: cx, y: Math.round(y) });
+      // 指针坐标是视口的，覆盖层坐标系是视频框的 → 先减去视频框左上角
+      const cx = clampCenterX(ev.clientX - drag.dx - g.left);
+      const localY = ev.clientY - drag.dy - g.top;
+      const y = Math.max(4, Math.min(localY, Math.max(4, g.height - h - 4)));
+      applyFreePosition({ nx: cx / g.width, ny: y / g.height });
+      // 立即回写成像素，避免拖动过程中反复按比例换算产生累积误差
+      boxEl.style.left = cx + 'px';
+      boxEl.style.top = Math.round(y) + 'px';
     };
 
     const onUp = () => {
       if (!drag) return;
       drag = null;
       boxEl.classList.remove('trace-dragging');
-      const pos = {
-        x: parseFloat(boxEl.style.left) || window.innerWidth / 2,
-        y: parseFloat(boxEl.style.top) || 0,
-      };
-      savePosition(pos);
+      const g = overlayGeom();
+      const px = parseFloat(boxEl.style.left);
+      const py = parseFloat(boxEl.style.top);
+      savePosition({
+        nx: (Number.isFinite(px) ? px : g.width / 2) / g.width,
+        ny: (Number.isFinite(py) ? py : 0) / g.height,
+      });
     };
 
     handleEl.addEventListener('pointerdown', onDown);
@@ -520,13 +628,10 @@
     // 拖动期间强制保持，松手后再按指针位置决定
     handleEl.addEventListener('pointerdown', () => showHandle());
 
-    // 窗口尺寸变化时，重新夹紧中心点，避免字幕框跑到视口外
+    // 窗口尺寸变化时重算覆盖层几何，再重新夹紧中心点，避免字幕框跑到画面外
     window.addEventListener('resize', () => {
-      if (!state.settings?.freePos || !boxEl) return;
-      const cx = parseFloat(boxEl.style.left) || window.innerWidth / 2;
-      const h = boxEl.offsetHeight || 0;
-      const y = Math.min(parseFloat(boxEl.style.top) || 0, Math.max(4, window.innerHeight - h - 4));
-      applyFreePosition({ x: clampCenterX(cx), y: Math.round(y) });
+      lastGeomKey = '';
+      applyOverlayFrame();
     });
   }
 
@@ -556,6 +661,9 @@
     overlayEl.style.setProperty('--trace-blur', (s.blur ?? 18) + 'px');
     overlayEl.dataset.mode = s.mode;
     overlayEl.classList.toggle('trace-hidden', !s.enabled);
+    // 先贴住视频框（写入 --trace-vscale / --trace-panel-reserve），再摆字幕框
+    lastGeomKey = '';
+    applyOverlayFrame();
     // 有保存的自由位置就进入自由模式，否则回到默认底部居中
     applyFreePosition(s.freePos || null);
     // 悬浮按钮跟着开关键变灰
@@ -588,10 +696,7 @@
       }
     }
     // 句子变长/变短后框宽会变，自由模式下重新夹紧中心点，避免贴边溢出
-    if (state.settings?.freePos) {
-      const cx = parseFloat(boxEl?.style.left) || window.innerWidth / 2;
-      if (boxEl) boxEl.style.left = clampCenterX(cx) + 'px';
-    }
+    if (state.settings?.freePos) reapplyFreePos();
   }
 
   /**
@@ -956,6 +1061,10 @@
 
   function tick() {
     const v = getVideo();
+    // 跟随视频框：全屏切换、影院模式、窗口缩放、顶栏折叠都会改变播放器矩形。
+    // 放在 rAF 里做是因为 YouTube 的这些变化没有统一事件，而且 applyOverlayFrame
+    // 内部有几何签名去重，没变化时只是一次字符串比较，开销可以忽略。
+    applyOverlayFrame();
     if (v && state.ready) {
       const s = S.findByTime(state.sentences, v.currentTime);
       const key = s ? s.start + '|' + s.text : '';
@@ -1252,6 +1361,12 @@
     state.videoId = getVideoId();
     loadWordSet();
     startLoop();
+
+    // 全屏切换时立刻重算一次（rAF 里也会跟，但这一下能消掉一帧的滞后）
+    document.addEventListener('fullscreenchange', () => {
+      lastGeomKey = '';
+      applyOverlayFrame();
+    });
 
     // 监听页面切换 / 播放器就绪
     window.addEventListener('yt-navigate-finish', () => scheduleLoad(700));
