@@ -17,9 +17,15 @@ const { chromium } = require('playwright');
 const path = require('path');
 const fs = require('fs');
 const fx = require('./mock/fixtures');
+const { copyExtWithHost } = require('./lib/perm-ext');
 
 const CHROME = 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
-const EXT = path.resolve(__dirname, '..', 'trace-subtitles');
+// 大模型那几项要打 https://llm.test，而 llm.test 是任意域名，manifest 里静态声明不了。
+// 若靠 chrome.permissions.request() 现场申请，Chrome 会弹**原生**权限气泡 ——
+// 它不在 DOM 里，Playwright 点不到，request() 的 promise 永远挂着（曾把本测试
+// 拖成 600s 超时、一行 RESULT 都没有）。所以复制一份扩展、把 llm.test 预置进
+// host_permissions（等价于用户此前已点过允许），详见 lib/perm-ext.js。
+const EXT = copyExtWithHost('https://llm.test', path.join(__dirname, '.perm-ext-phrase'));
 const ORIGIN = 'https://www.youtube.com';
 const WATCH = `${ORIGIN}/watch?v=${fx.VIDEO_ID}`;
 
@@ -205,9 +211,78 @@ function check(name, ok, extra) {
     if (pop) pop.classList.add('trace-hidden');
   });
 
+  // ---- L2b~L2e：真实鼠标拖选短语 ----
+  // 用户报障：「把两个单词一起选中（例如 dive in）后点击查询，结果仍然只查其中一个单词」。
+  //
+  // 旧代码只挂了 click 监听。实测（真实 Chrome）从 "pay" 拖到 "your"，mouseup 之后
+  // 浏览器派发的 click 目标是**共同祖先**而不是起始词，所以 closest('.trace-word')
+  // 取不到任何词，直接 return —— 什么也不弹，短语分支（data-p）永远走不到。
+  //
+  // 这条用真实 mouse.down/move/up 拖选，不能用 click()，否则测不到真实交互。
+  {
+    const wordBox = async (text, nth = 0) =>
+      page.evaluate(
+        ({ text, nth }) => {
+          const els = [...document.querySelectorAll('#trace-sub-overlay .trace-sub-orig .trace-word')]
+            .filter((e) => (e.textContent || '').toLowerCase() === text);
+          const el = els[nth];
+          if (!el) return null;
+          const r = el.getBoundingClientRect();
+          return { x: r.x, y: r.y, w: r.width, h: r.height };
+        },
+        { text, nth }
+      );
+
+    // 隐藏已有的卡片，确保下面看到的是新弹的
+    await page.evaluate(() => {
+      const pop = document.querySelector('#trace-word-popup');
+      if (pop) pop.classList.add('trace-hidden');
+    });
+
+    const payBox = await wordBox('pay');
+    const yourBox = await wordBox('your');
+    check('L2b 字幕里能定位到 pay / your 两个词', !!payBox && !!yourBox, { payBox, yourBox });
+
+    if (payBox && yourBox) {
+      // 从 pay 左侧拖到 your 右侧 —— 真实的跨 span 拖选
+      await page.mouse.move(payBox.x + 2, payBox.y + payBox.h / 2);
+      await page.mouse.down();
+      await page.mouse.move(yourBox.x + yourBox.w - 2, yourBox.y + yourBox.h / 2, { steps: 14 });
+      await page.mouse.up();
+      await page.waitForTimeout(1800);
+
+      const dragSel = await page.evaluate(() => String(getSelection() || ''));
+      check('L2c 拖选后浏览器选区是 pay your', /^pay\s+your$/i.test(dragSel.trim()), dragSel);
+
+      const dragCard = await page.evaluate(() => {
+        const pop = document.querySelector('#trace-word-popup');
+        if (!pop || pop.classList.contains('trace-hidden')) return null;
+        return {
+          title: pop.querySelector('.trace-pop-word')?.textContent?.trim() || '',
+          gloss: pop.querySelector('.trace-pop-phrase-gloss')?.textContent?.trim() || '',
+          hasPhraseCard: !!pop.querySelector('.trace-pop-phrase-gloss'),
+        };
+      });
+      check('L2d 拖选短语会弹出短语卡（不是单词卡）', !!dragCard && dragCard.hasPhraseCard, dragCard);
+      check(
+        'L2e 短语卡标题是整段 pay your（不是单个词）',
+        !!dragCard && /^pay\s+your$/i.test(dragCard.title),
+        dragCard && dragCard.title
+      );
+
+      // 收起卡片，避免影响后面的断言
+      await page.evaluate(() => {
+        const pop = document.querySelector('#trace-word-popup');
+        if (pop) pop.classList.add('trace-hidden');
+        getSelection()?.removeAllRanges();
+      });
+    }
+  }
+
   // ---- L3/L4：把三个词都收藏成短语 ----
   // 直接走后台 API 造数据（模拟"用户之前收藏过 pay your fair"），
-  // 因为逐个点选需要真实的文本选区交互，而夹具里的字幕是 span 不是可选文本。
+  // 因为这里要验证的是「收藏后的高亮与词库展示」，不是划词交互本身
+  // （划词交互已由上面的 L2b~L2e 用真实拖选覆盖）。
   await sw.evaluate(async () => {
     const D = globalThis.__traceDebug;
     await D.addWordNotify({
@@ -389,24 +464,17 @@ function check(name, ok, extra) {
   // 配置指向本地假服务。注意 host permission 必须真的授予：bg.js 的 llmChat /
   // llmListModels 会先检查 chrome.permissions.contains，没有权限直接抛
   // 「未授权访问该 API 地址」，根本不会走到 fetch（这是 bug 17 的修复）。
-  // 而 permissions.request 只能在用户手势里调用，SW 里调必被拒 ——
-  // 所以借一个扩展页面（有真实点击手势）去申请，再回 SW 里跑。
+  //
+  // 权限已经由文件头的 copyExtWithHost() 预置进 manifest 的 host_permissions，
+  // 等价于「用户此前已允许」。**不要**在这里再调 chrome.permissions.request()：
+  // 那会弹原生气泡，Playwright 点不到，promise 永远挂着 → 整条 await 卡死
+  // （历史事故：600s 超时、没有 RESULT 行）。也不要 permissions.remove()，
+  // 预置权限一旦移除就再也拿不回来（request 又会去弹那个点不到的框）。
   {
-    const permPage = await ctx.newPage();
-    await permPage.goto(`chrome-extension://${extId}/popup.html`, { waitUntil: 'domcontentloaded' });
-    await permPage.evaluate(
-      () =>
-        new Promise((res) => {
-          chrome.permissions
-            .request({ origins: ['https://llm.test/*'] })
-            .then((g) => res(g), () => res(false));
-        })
-    );
-    await permPage.close();
     const granted = await sw.evaluate(() =>
       chrome.permissions.contains({ origins: ['https://llm.test/*'] })
     );
-    check('L16b 大模型域名权限已授予（否则走不到 fetch）', granted === true, { granted });
+    check('L16b 大模型域名权限已预置（否则走不到 fetch）', granted === true, { granted });
   }
 
   await sw.evaluate(async () => {

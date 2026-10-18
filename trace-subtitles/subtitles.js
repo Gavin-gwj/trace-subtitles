@@ -13,6 +13,16 @@
 
   const SENT_END = /[.!?。！？…]["'”’)）\]]*\s*$/;
   const CLAUSE_END = /[,;:，；：、]\s*$/;
+  /**
+   * 句中（非结尾）的句末标点。
+   *
+   * 为什么必须单独处理：YouTube 的 cue 边界不可靠，经常出现「一条 cue 里塞了两句」
+   * —— 前一句已经带句号，后一句跟着逗号。旧逻辑只看文本结尾是不是 SENT_END，
+   * 中间那个句号完全不起作用，于是两句被当成一句、整段挤成两行长英文。
+   *
+   * 冒号不在此列：`He said: "..."` 这种引语被拆开反而更难读。
+   */
+  const SENT_MID = /[.!?。！？…]["'”’)）\]]*\s+/g;
   /** 拆分后每段的最小长度，太短的尾巴（"not each fragment."）要并进相邻段 */
   const MIN_PART = 26;
 
@@ -140,9 +150,36 @@
   }
 
   /**
+   * 把一段文本按「句中句号」切成真正的句子。
+   *
+   * 一条 cue 里塞两句是 ASR 字幕的常态（"...vocabulary. The thinking goes, ..."）。
+   * 不切的话这两句会作为一条长句送翻译，英文显示成两行长行，而且机翻会把
+   * 两个句子的语气混在一起。切在句号后面最安全 —— 句号本来就是语义边界。
+   *
+   * 单句、中间没有句号时原样返回一条，不会被拆开。
+   */
+  function splitAtSentEnd(text) {
+    const t = String(text || '').trim();
+    if (!t) return [];
+    const out = [];
+    let last = 0;
+    SENT_MID.lastIndex = 0;
+    let m;
+    while ((m = SENT_MID.exec(t))) {
+      const end = m.index + m[0].length;
+      const piece = t.slice(last, end).trim();
+      if (piece) out.push(piece);
+      last = end;
+    }
+    const tail = t.slice(last).trim();
+    if (tail) out.push(tail);
+    return out.length ? out : [t];
+  }
+
+  /**
    * 把碎片行合并成句子。
-   * 规则：遇到句末标点就收句；单句过长（>maxLen）在逗号处断开；
-   * 相邻行间隔过大（>gap）也断开。
+   * 规则：遇到句末标点就收句（**包括句子中间的句号**）；单句过长（>maxLen）
+   * 在逗号处断开；相邻行间隔过大（>gap）也断开。
    *
    * maxLen 从 180 收到 120：
    *   180 的时候，字幕框最宽可到 1180px，一句 130 字符的英文能撑满两行、
@@ -155,28 +192,42 @@
     const sentences = [];
     let cur = null;
 
+    /**
+     * 收句。两级切分：
+     *   1) 先在句中句号处切成独立句子（splitAtSentEnd）—— 修「两句被连成一行」
+     *   2) 每句仍然过长时再按逗号/空格切（splitLong）
+     * 两级都按字符数比例分摊时间轴，否则 findByTime 只会命中第一段，
+     * 后面几段永远显示不出来。
+     */
     const flush = () => {
       if (cur && cur.text.trim()) {
         cur.text = cur.text.replace(/\s+/g, ' ').trim();
-        // 太长的句子（没有逗号可断的那种）交给 splitLong 二次切分
-        const parts = splitLong(cur.text, maxLen);
-        if (parts.length <= 1) {
-          sentences.push(cur);
-        } else {
-          // 切成了多段：时间轴按字符数比例分配，否则 findByTime 只会命中第一段，
-          // 后面几段永远显示不出来。
-          const total = cur.text.length;
-          const span = Math.max(0.3, cur.end - cur.start);
-          let acc = 0;
-          for (const part of parts) {
-            const share = part.text.length / total;
-            sentences.push({
-              ...cur,
-              start: cur.start + span * acc,
-              end: cur.start + span * (acc + share),
-              text: part.text,
-            });
-            acc += share;
+        const chunks = splitAtSentEnd(cur.text);
+        const total = chunks.reduce((n, c) => n + c.length, 0) || 1;
+        const span = Math.max(0.3, cur.end - cur.start);
+        let acc = 0;
+        for (const chunk of chunks) {
+          const share = chunk.length / total;
+          const cStart = cur.start + span * acc;
+          const cEnd = cur.start + span * (acc + share);
+          acc += share;
+
+          const parts = splitLong(chunk, maxLen);
+          if (parts.length <= 1) {
+            sentences.push({ ...cur, start: cStart, end: cEnd, text: chunk });
+          } else {
+            const inner = parts.reduce((n, p) => n + p.text.length, 0) || 1;
+            let a2 = 0;
+            for (const part of parts) {
+              const s2 = part.text.length / inner;
+              sentences.push({
+                ...cur,
+                start: cStart + (cEnd - cStart) * a2,
+                end: cStart + (cEnd - cStart) * (a2 + s2),
+                text: part.text,
+              });
+              a2 += s2;
+            }
           }
         }
       }
@@ -364,5 +415,5 @@
   }
   // >>> WORD_FORMS_END
 
-  window.TraceSubs = { parse, segment, hash, findByTime, wordForms, SENT_END };
+  window.TraceSubs = { parse, segment, splitAtSentEnd, hash, findByTime, wordForms, SENT_END };
 })();

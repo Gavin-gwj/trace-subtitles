@@ -1,20 +1,43 @@
 /**
  * test-llm.js —— 大模型引擎配置链路回归
  *
- * 背景（真实 bug）：chrome.permissions.request 必须在用户手势里调用。
- * 早期版本把它写在 bg.js 的 'settings:set' 处理器里，消息处理器没有手势
+ * 背景（真实 bug 17）：`chrome.permissions.request` 必须在用户手势里调用。
+ * 早期版本把它写在 bg.js 的 `'settings:set'` 处理器里，消息处理器没有手势
  * 上下文 → Chrome 抛 "This function must be called during a user gesture"
  * → 权限永远拿不到 → fetch 只会报 "Failed to fetch"，用户以为是地址/密钥错。
  *
- * 本测试跑真实弹窗页面（chrome-extension://<id>/popup.html），点真实按钮，
- * 验证：① 点「拉取模型列表」能拿到模型（= 权限申请成功）；② 点「测试连接」
- * 真发一条请求；③ 权限授予后后台能真的用大模型翻译。
+ * ## 这个测试怎么避开「原生弹框点不到」
+ *
+ * Chrome 的扩展权限弹框是浏览器原生 Views 气泡，Playwright 点不到；实测 8 组
+ * 候选启动参数全部无效，`request()` 的 promise 永远挂着（详见 lib/perm-ext.js）。
+ *
+ * 所以：把扩展复制到固定临时目录，并在 `host_permissions` 里预置 `llm.test`
+ * （等价于「用户此前已允许」），再走真实点击。这样 fetch 真能发出。
+ *
+ * ## 预置了权限，还怎么抓 bug 17
+ *
+ * 判据是**调用次数**，不是手势状态：bug 17 的代码把申请交给后台，popup 页面
+ * 从头到尾一次都不会调用 `chrome.permissions.request`。
+ *
+ *   P4 点「拉取模型列表」后 popup 自己发起了权限申请   ← 修复前恒为 0 次
+ *   P4b 申请带的是填写的那个 origin
+ *
+ * 反向验证：注释掉 popup.js 里两处 `requestLlmOrigin()` → P4/P4b 立刻 FAIL。
+ *
+ * 验证：① 点「拉取模型列表」能拿到模型；② 点「测试连接」真发一条请求；
+ * ③ 后台能真的用大模型翻译；④ 服务挂掉时降级不白屏。
  */
 const path = require('path');
 const { chromium } = require('playwright');
+const {
+  copyExtWithHost,
+  installPermProbe,
+  readPermCalls,
+} = require('./lib/perm-ext');
 
 const CHROME = 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
-const EXT = path.resolve(__dirname, '..', 'trace-subtitles');
+// 预置了 llm.test 的扩展副本；固定路径 → 扩展 ID 稳定
+const EXT = path.join(__dirname, '.perm-ext-llm');
 const LLM = 'https://llm.test';
 const MODELS = ['fake-alpha', 'fake-beta', 'fake-gamma'];
 
@@ -27,6 +50,8 @@ function check(name, ok, extra) {
 }
 
 (async () => {
+  copyExtWithHost(LLM, EXT);
+
   const ctx = await chromium.launchPersistentContext(
     path.join(__dirname, '.chrome-llm'),
     {
@@ -89,23 +114,18 @@ function check(name, ok, extra) {
   const extId = new URL(sw.url()).host;
   console.log('extId:', extId);
 
-  // 清掉上一轮可能残留的授权与配置，保证从零开始。
-  // 这一步不能省：权限是持久化的，上一轮跑过之后 https://llm.test/* 仍是已授权
-  // 状态，fetch 能直接成功 —— 那样这个测试就抓不到「没在手势里申请权限」的 bug 了。
-  const clean = await sw.evaluate(async (base) => {
+  // 清掉上一轮可能残留的配置，保证从零开始。
+  // 注意：这里**不** remove 权限 —— 权限是 manifest 预置的，remove 掉就再也拿不回来
+  // （request 会弹原生框挂住）。预置权限不影响 bug 17 的判别力，因为判据是
+  // 「popup 有没有自己发起申请」，与权限最终是否授予无关。
+  const clean = await sw.evaluate(async () => {
     const { settings } = await chrome.storage.local.get('settings');
     const next = { ...(settings || {}), llmBaseUrl: '', llmApiKey: '', llmModel: '' };
     await chrome.storage.local.set({ settings: next });
-    let removed = false;
-    try {
-      const u = new URL(base);
-      removed = await chrome.permissions.remove({ origins: [u.origin + '/*'] });
-    } catch (_) {}
-    const still = await chrome.permissions.contains({ origins: ['https://llm.test/*'] });
-    return { removed, still };
-  }, LLM + '/v1');
-  console.log('clean state:', clean);
-  check('P0 起始状态未授权（否则测不出权限 bug）', clean.still === false, clean);
+    return await chrome.permissions.contains({ origins: ['https://llm.test/*'] });
+  });
+  console.log('pre-granted:', clean);
+  check('P0 预置权限已生效（否则走不到 fetch）', clean === true, { preGranted: clean });
 
   // 打开真实弹窗页面（不是 popup 窗口，但同源同 API，按钮逻辑一致）
   const page = await ctx.newPage();
@@ -114,6 +134,8 @@ function check(name, ok, extra) {
   page.on('console', (m) => {
     if (m.type() === 'error' || m.type() === 'warning') console.log('CONSOLE', m.type(), m.text());
   });
+  // 观察器必须在 goto 之前装：它要包住 popup.js 加载后就绑定的那批处理器
+  await installPermProbe(page);
   await page.goto(`chrome-extension://${extId}/popup.html`, { waitUntil: 'domcontentloaded' });
   await page.waitForTimeout(600);
 
@@ -156,7 +178,21 @@ function check(name, ok, extra) {
   });
   check('P3 模型列表内容正确', opts.join(',') === MODELS.join(','), { opts });
 
-  // 验证权限真的被授予了（这是 bug 的根因所在）
+  // —— bug 17 的判别点 ——
+  // 申请必须由 popup 页面自己在 click 处理器里发起。修复前申请写在 bg.js 的
+  // 消息处理器里，popup 一次都不会调用 request()，所以这里会是空数组。
+  const calls = await readPermCalls(page);
+  check('P4 popup 自己发起了权限申请（修复前恒为 0 次）', calls.length >= 1, {
+    calls: calls.map((c) => c.origins),
+  });
+  const askedOrigin = calls.length ? (calls[calls.length - 1].origins || [])[0] : '';
+  check(
+    'P4b 申请的是填写的那个 origin',
+    askedOrigin === LLM + '/*',
+    { askedOrigin, want: LLM + '/*' }
+  );
+
+  // 验证权限确实已生效（fetch 能打出去）
   const permGranted = await sw.evaluate(async (base) => {
     try {
       const u = new URL(base);
@@ -165,7 +201,7 @@ function check(name, ok, extra) {
       return false;
     }
   }, LLM + '/v1');
-  check('P4 点击后该域名权限已授予', permGranted === true, { permGranted });
+  check('P5 该域名权限已授予', permGranted === true, { permGranted });
 
   // 选模型 + 测试连接
   await page.selectOption('#llmModel', MODELS[1]);
@@ -177,15 +213,18 @@ function check(name, ok, extra) {
     if (/连接正常|连接失败/.test(thint)) break;
     await page.waitForTimeout(300);
   }
-  check('P5 点「测试连接」返回连接正常', /连接正常/.test(thint), { hint: thint.trim() });
-  check('P6 测试连接真的发出了请求', chatHits >= 1, { chatHits });
+  check('P6 点「测试连接」返回连接正常', /连接正常/.test(thint), { hint: thint.trim() });
+  check('P7 测试连接真的发出了请求', chatHits >= 1, { chatHits });
   check(
-    'P7 请求带了配置的模型名',
+    'P8 请求带了配置的模型名',
     !!lastChatBody && lastChatBody.model === MODELS[1],
     { model: lastChatBody && lastChatBody.model }
   );
+  // 测试连接也必须走同一套权限申请（否则用户只点「测试连接」时拿不到权限）
+  const calls2 = await readPermCalls(page);
+  check('P8b 测试连接也发起了权限申请', calls2.length >= 2, { n: calls2.length });
 
-  // 权限到位后，后台应当能真的用大模型翻译
+  // 后台应当能真的用大模型翻译
   const trans = await sw.evaluate(async () => {
     try {
       const out = await globalThis.__traceDebug.translateBatch(
@@ -198,14 +237,31 @@ function check(name, ok, extra) {
       return { ok: false, err: String((e && e.message) || e) };
     }
   });
-  check('P8 权限到位后后台能调通大模型', trans.ok === true, trans);
+  check('P9 后台能调通大模型', trans.ok === true, trans);
   check(
-    'P9 大模型译文非空',
+    'P10 大模型译文非空',
     trans.ok && Array.isArray(trans.out) && trans.out.filter((s) => s && s.trim()).length >= 1,
     { out: trans.out }
   );
 
-  check('P10 无 JS 错误', errors.length === 0, { errors });
+  // 服务挂掉时必须降级，不能白屏
+  const down = await sw.evaluate(async () => {
+    // 指向一个不会被 route 拦截的端口，制造网络失败
+    await globalThis.__traceDebug.setSettings({ llmBaseUrl: 'https://llm-down.test/v1' });
+    try {
+      const out = await globalThis.__traceDebug.translateBatch(['Something brand new.'], 'en', 'zh-CN');
+      return { ok: true, out };
+    } catch (e) {
+      return { ok: false, err: String((e && e.message) || e) };
+    }
+  });
+  check(
+    'P11 大模型不可用时自动降级（仍有译文）',
+    down.ok && Array.isArray(down.out) && !!down.out[0] && down.out[0].trim().length > 0,
+    down
+  );
+
+  check('P12 无 JS 错误', errors.length === 0, { errors });
 
   await page.screenshot({ path: path.join(__dirname, 'shot-llm.png'), fullPage: false });
   await ctx.close();
@@ -215,7 +271,7 @@ function check(name, ok, extra) {
     console.log('RESULT: FAIL (' + failed.join(', ') + ')');
     process.exit(1);
   }
-  console.log('RESULT: PASS（大模型配置：手势里申请权限 + 拉模型 + 测试连接 + 后台可用）');
+  console.log('RESULT: PASS（大模型配置：手势里申请权限 + 拉模型 + 测试连接 + 后台可用 + 降级）');
 })().catch((e) => {
   console.error('FATAL', e);
   process.exit(1);

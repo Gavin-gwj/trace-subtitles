@@ -6,6 +6,9 @@ package-lock.json
 .chrome*/
 tools/.chrome*/
 
+# 测试用的扩展副本（lib/perm-ext.js 生成，用来预置 host_permissions）
+tools/.perm-ext*/
+
 # 逆向临时工作区
 tools/probe-ext*/
 

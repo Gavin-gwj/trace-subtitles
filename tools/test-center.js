@@ -44,7 +44,23 @@ const VH = 900;
   const page = await ctx.newPage();
   await page.goto(`${ORIGIN}/watch?v=${F.VIDEO_ID}`, { waitUntil: 'domcontentloaded' });
   await page.waitForSelector('.trace-sub-box', { state: 'attached', timeout: 20000 });
-  await page.waitForTimeout(2500);
+
+  // 等到**真的有一句字幕**再开始，不能只等 box 挂载。
+  // 为什么：box 是同步建出来的（bug 13 的修复让它不依赖后台设置），但字幕要等
+  // timedtext 抓取 + 分句完成。MV3 的 service worker 冷启动偶尔超过 2.5s，
+  // 那时 box 在、`.trace-sub-orig` 却是空的 → 后面的采样全部拿到空文本 →
+  // distinctSentences 为 0，报一个看起来像"位置漂移"的假失败（实测约 1/10 概率）。
+  // 这里等到有文本为止，超时就明确报「字幕一直没出来」，而不是让它伪装成位置问题。
+  await page.waitForFunction(
+    () => {
+      const o = document.querySelector('#trace-sub-overlay .trace-sub-orig');
+      return !!o && (o.textContent || '').trim().length > 0;
+    },
+    null,
+    { timeout: 20000 }
+  );
+  // 再多等一拍，让首句译文/几何都稳定下来
+  await page.waitForTimeout(1200);
 
   const box0 = await page.locator('.trace-sub-box').boundingBox();
   const center0 = box0.x + box0.width / 2;
@@ -86,8 +102,11 @@ const VH = 900;
   const wentUp = topBox.y < afterH.y;
 
   // ---- 3) 换句采样：不同长度的句子，中心必须完全一致 ----
+  // 攒够 4 句就收工（最多等 40 拍）。夹具总共只有 19.2s、6 句左右，
+  // 固定跑满 40 拍既慢又容易在视频播完后采到空文本。
   const samples = [];
-  for (let i = 0; i < 40; i++) {
+  const seen = new Set();
+  for (let i = 0; i < 40 && seen.size < 4; i++) {
     const s = await page.evaluate(() => {
       const v = document.querySelector('video');
       const orig = document.querySelector('.trace-sub-orig');
@@ -102,7 +121,10 @@ const VH = 900;
         top: Math.round(r.y),
       };
     });
-    if (s && s.text) samples.push(s);
+    if (s && s.text) {
+      samples.push(s);
+      seen.add(s.text);
+    }
     await page.waitForTimeout(300);
   }
 

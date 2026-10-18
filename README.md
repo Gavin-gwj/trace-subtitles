@@ -234,11 +234,17 @@ window.ytInitialPlayerResponse.captions…              // 兜底 2
 不依赖任何 NLP 服务，用启发式把碎片拼成句子：
 
 - 收句条件：句末标点 `SENT_END = /[.!?。！？…]["'”’)）\]]*\s*$/`
+- **句中句号也断句**：`SENT_MID = /[.!?。！？…]["'”’)）\]]*\s+/g`（见 bug 19）。
+  cue 里塞两句是 ASR 常态，只看结尾等于放弃那个句号，两句会被连成一行超长英文
 - 边界条件：与上一片的时间间隔 `gap > 2.0s` 也强制断开
 - 超长保护：`maxLen = 120` 字符，超出交给 `splitLong()` 二次切分（见下）
 - 处理 YouTube 自动字幕的典型脏数据：碎片无标点、首字母小写、重复滚动行
 
 实测把测试夹具的 **13 行碎片 → 6 个句子**，最长 111 字符，译文连贯。
+
+分句是**两级**的：`splitAtSentEnd()` 先按句中句号切成真句子，每句仍超过 `maxLen`
+时再交给 `splitLong()` 按逗号/空格切。两级都按字符数比例分摊时间轴，否则
+`findByTime()` 只命中第一段，后面几段永远显示不出来。
 
 **超长句二次切分（`splitLong()`）**
 
@@ -353,7 +359,7 @@ store），同一个视频二次打开不再请求网络。
 - **退化路径**：若引擎把哨兵全吃掉（例如 MyMemory），`usable` 判定失败 → 退回纯译文，
   中文不高亮但至少能读，不会显示乱码。
 
-### 过程中修掉的十九个真实 bug（值得记录）
+### 过程中修掉的二十一个真实 bug（值得记录）
 
 **bug 1：跨消息传函数。** `content.js` 曾把 `hash: S.hash` 放进 `chrome.runtime.sendMessage`，
 而消息经过结构化克隆会丢掉函数，SW 侧抛 `TypeError: hashFn is not a function`。
@@ -1044,44 +1050,193 @@ permissions.request from SW: {"ok":false,"err":"This function must be called dur
    `未授权访问该 API 地址，请在弹窗里点一次「测试连接」授权`。
    这句报错**直接告诉用户该点哪里**，而不是让他去猜 `Failed to fetch`。
 
-**回归测试（`tools/test-llm.js`，11 项）**。它跑真实弹窗页面、点真实按钮，
-所以走的是真实手势路径：
+**回归测试（`tools/test-llm.js`，15 项）**。它跑真实弹窗页面、点真实按钮，
+所以走的是真实手势路径（原生权限弹框点不到的问题与解法见本节末尾「三堵墙」）：
 
 ```
-✓ P0 起始状态未授权（否则测不出权限 bug） {"removed":true,"still":false}
+✓ P0 预置权限已生效（否则走不到 fetch） {"preGranted":true}
 ✓ P1 选中「大模型」后配置区展开
 ✓ P2 点「拉取模型列表」能拿到模型 {"hint":"共 3 个模型，选一个即可",…}
 ✓ P3 模型列表内容正确 {"opts":["fake-alpha","fake-beta","fake-gamma"]}
-✓ P4 点击后该域名权限已授予 {"permGranted":true}
-✓ P5 点「测试连接」返回连接正常 {"hint":"连接正常（4ms）：【LLM】这是大模型译文"}
-✓ P6 测试连接真的发出了请求 {"chatHits":1}
-✓ P7 请求带了配置的模型名 {"model":"fake-beta"}
-✓ P8 权限到位后后台能调通大模型 {"ok":true,"out":[…]}
-✓ P9 大模型译文非空
-✓ P10 无 JS 错误 {"errors":[]}
+✓ P4 popup 自己发起了权限申请（修复前恒为 0 次） {"calls":[["https://llm.test/*"]]}
+✓ P4b 申请的是填写的那个 origin {"askedOrigin":"https://llm.test/*"}
+✓ P5 该域名权限已授予 {"permGranted":true}
+✓ P6 点「测试连接」返回连接正常 {"hint":"连接正常（6ms）：【LLM】这是大模型译文"}
+✓ P7 测试连接真的发出了请求 {"chatHits":1}
+✓ P8 请求带了配置的模型名 {"model":"fake-beta"}
+✓ P8b 测试连接也发起了权限申请 {"n":2}
+✓ P9 后台能调通大模型 {"ok":true,"out":[…]}
+✓ P10 大模型译文非空
+✓ P11 大模型不可用时自动降级（仍有译文） {"out":["一些全新的东西。"]}
+✓ P12 无 JS 错误 {"errors":[]}
 ```
 
-`P0` 是这次特意加的：**权限是持久化的**，上一轮跑过之后 `https://llm.test/*` 仍是
-已授权状态，`fetch` 能直接成功 —— 那样这个测试就抓不到 bug 了。第一次跑
-`test-llm.js` 时正是因为残留授权而「虚假通过」，加上 `permissions.remove()` 复位
-后才是真测试。
+### 写这个测试时撞到的三堵墙（每条都值得记）
 
-反向验证：把 `popup.js` 里两处 `requestLlmOrigin()` 调用删掉（模拟修复前的代码），
-`P2`/`P3`/`P4` 立刻 FAIL，且提示变成新的可操作文案：
+**第一堵：Chrome 的扩展权限弹框是原生的，Playwright 点不到。**
+
+`optional_host_permissions` 里的域名只能运行时 `chrome.permissions.request()` 申请，
+而 Chrome 会弹一个**浏览器原生 Views 气泡**（「"Trace 字幕翻译"请求获得更多权限」+
+允许/拒绝）。它不在 DOM 里，Playwright 没有任何选择器能碰到它。
+
+后果不是报错，而是**静默挂死**：`request()` 的 promise 既不 resolve 也不 reject，
+整条 `await` 永远停在那儿。表现是测试 600s 超时、**一行 RESULT 都没有**——
+`test-phrase.js` 就这样被拖死过一次，排查了半天才发现屏幕右下角一直挂着一个没人点的框。
+
+试过 8 组启动参数想绕过，全部无效：
+
+| 参数 | 结果 |
+|---|---|
+| `--auto-accept-extension-permission-prompts` | pending, granted=false |
+| `--disable-extensions-permission-prompts` | pending, granted=false |
+| `--extensions-permission-prompt-automation` | pending, granted=false |
+| `--enable-features=ExtensionPermissionAutoAccept` | pending, granted=false |
+| `--disable-features=ExtensionsPermissionPrompts` | pending, granted=false |
+| `--extensions-manifest-v2-only` | pending, granted=false |
+| `--grant-permissions=*` | 第一次 resolved:true，复跑 3 次全 pending |
+| `--allowlisted-extension-id=*` | 第一次 resolved:true，复跑 3 次全 pending |
+
+最后两个是**假阳性**，教训是：这类「第一次成功」必须连跑 3 次才算数。
+直接改 profile 的 `Preferences` 也不行，`Secure Preferences` 有 HMAC 校验。
+
+**解法：把域名预置进 `host_permissions`。** 测试时复制一份扩展到临时目录，
+把 `https://llm.test/*` 写进 `host_permissions`（等价于「用户此前已点过允许」），
+`request()` 就立即 resolve(true) 且不弹框。用**固定路径**而非 `mkdtemp`——
+未打包扩展的 ID 由路径哈希而来，路径一变 ID 就变，profile 里的旧状态全部失效。
+工具在 `tools/lib/perm-ext.js`。
+
+**第二堵：预置了权限，还怎么抓 bug 17？**
+
+预置只解决「权限已授予」这个前置状态，不改变被测代码的**调用位置**。判据得换个角度：
+bug 17 的代码把申请交给 `bg.js`，而 `bg.js` 的消息处理器没有手势上下文 →
+**popup 页面从头到尾一次都不会调用 `chrome.permissions.request`**。
+
+所以判据是**调用次数**，不是「权限最终有没有授予」：
+
+- 修复后：点「拉取模型列表」→ popup 记录到 1 次调用，origins 正确
+- 修复前：申请在 `bg.js` → popup 记录恒为 0 次
+
+这也解释了为什么**只看「能不能拉到模型」会漏掉 bug 17**——预置权限后 `P2` 在
+修复前后都是 PASS（见下面的反向验证表），只有调用次数能区分。
+
+**第三堵：`navigator.userActivation.isActive` 不能当判据。**
+
+第一版用 `isActive` 断言「申请发生在手势里」，还配了个灵敏度自检：在非手势上下文里
+调用 `request()`，期望拿到 `active === false`。**自检直接失败**——`page.evaluate`
+走 CDP 的 `Runtime.evaluate`，默认就带 `userGesture: true`，所以 `isActive` 也是
+`true`。这个断言恒真，等于没测。
+
+灵敏度自检的价值就在这里：它证明了自己没用。留着这个记录，免得后人又想当然。
+
+反向验证：把 `popup.js` 里两处 `requestLlmOrigin()` 调用换成 `{ok:true}`（模拟
+修复前「申请交给后台」），`P4`/`P4b`/`P8b` 立刻 FAIL，而 `P2` **仍然 PASS**：
 
 ```
-✗ P2 点「拉取模型列表」能拿到模型 {"hint":"未授权访问该 API 地址，请点一次「测试连接」授权"}
-✗ P4 点击后该域名权限已授予 {"permGranted":false}
+✓ P2 点「拉取模型列表」能拿到模型 {"hint":"共 3 个模型，选一个即可",…}
+✗ P4 popup 自己发起了权限申请（修复前恒为 0 次） {"calls":[]}
+✗ P4b 申请的是填写的那个 origin {"askedOrigin":"","want":"https://llm.test/*"}
+✓ P5 该域名权限已授予 {"permGranted":true}
+RESULT: FAIL (P4 …, P4b …, P8b …)
 ```
 
 `test-phrase.js` 也补了 `L16b`。它原来靠 `ctx.route()` 在浏览器层面拦截，注释里
 写着「不需要真实网络权限」—— 这在 bug 17 之后不成立了，因为 `llmChat()` 会先
-`permissions.contains()` 自检，没权限根本走不到 `fetch`，`ctx.route()` 也就没机会
-生效。现在改为先开一个扩展页面（有真实手势）授予权限，再回 SW 里跑：
+`permissions.contains()` 自检，没权限根本走不到 `fetch`。中途它一度写成「在扩展页面里
+裸调 `chrome.permissions.request()`」，于是撞上第一堵墙（600s 超时）。现在与
+`test-llm.js` 共用同一套预置方案：
 
 ```
-✓ L16b 大模型域名权限已授予（否则走不到 fetch） {"granted":true}
+✓ L16b 大模型域名权限已预置（否则走不到 fetch） {"granted":true}
 ```
+
+顺带修掉了 `test-center.js` 的一个假失败：它原来只等 `.trace-sub-box` 挂载就开跑，
+但 box 是同步建的、字幕要等 timedtext + 分句（MV3 SW 冷启动偶尔 >2.5s），
+40 拍采样可能全是空文本 → `distinctSentences: 0`，看起来像「位置漂移」。
+改为先 `waitForFunction` 等 `.trace-sub-orig` 真有文本，再采样。
+
+**bug 18：鼠标拖选多个词，查出来的还是单个词。**
+
+用户反馈：在字幕上把 `dive in` 一起拖选，结果只查了其中一个词。截图里 `dive in`
+带的是**蓝色**选区高亮（浏览器原生 `::selection`），不是我们给生词本用的金色 ——
+说明用户确实是用鼠标拖选的。
+
+根本原因有两层，缺一层都修不好：
+
+1. **没有「从选区取短语」的代码**。`content.js` 的 `state` 里甚至留着一条注释
+   「用户最近一次选中的文本（用于判断"选的是短语还是单词"）」和一个
+   `lastSelection: ''` 字段，但它**从头到尾没被赋过值**。这个功能当初设计了、
+   没接上，短语查询分支（`data-p`）虽然写好了却永远走不到。
+
+2. **就算在 `click` 里读选区也读不到**。实测（Playwright + 真实 Chrome）用鼠标
+   从 `dive` 拖到 `in`，`mouseup` 之后浏览器派发的 `click` 目标会是**共同祖先**
+   （覆盖层容器），不是起始词 —— `ev.target.closest('.trace-word')` 取不到任何词，
+   旧代码直接 `return`，什么也不弹。用户看到的就是"选中了短语但没反应"。
+
+修复（`content.js`）：
+
+- 新增 `phraseFromSelection()`。判据三条：选区非折叠、**覆盖到至少 2 个
+  `.trace-word`**、选区两端都落在覆盖层内部（避免误抓页面上别处的选中文本）。
+  短语文本用**被覆盖到的词的原文拼**，不用 `selection.toString()` —— 拖选常带上
+  首尾标点、甚至从词中间开始，直接取会得到 `ive i` 这种垃圾短语。吸附到完整词
+  之后，查的就是用户眼睛看到的那个短语。
+- 两条触发路径：`onWordClick()` 里**第一件事**就判选区（必须在取
+  `ev.target.closest('.trace-word')` 之前，否则又落回单词语义）；
+  另外在 `document` 上补一个 `mouseup` 监听，`setTimeout(..., 0)` 等浏览器把
+  选区状态落定后再判一次。单点一个词时选区是折叠的，`phraseFromSelection()`
+  返回 `null`，不影响原有单词点击。
+
+**回归测试（`test-phrase.js` 新增 3 项）**，用真实鼠标拖选：
+
+```
+✓ L2c 拖选后浏览器选区是 pay your "pay your"
+✓ L2d 拖选短语会弹出短语卡（不是单词卡） {"title":"pay your","gloss":"支付你的","hasPhraseCard":true}
+✓ L2e 短语卡标题是整段 pay your（不是单个词） "pay your"
+```
+
+反向验证：`git stash push content.js` 后跑同一套测试，`L2d`/`L2e` 立刻 FAIL。
+
+**bug 19：一条字幕里已经有两个句子，被连成一行超长英文。**
+
+用户反馈：「一个句子里中间已经有一个句号了，前后两句被连在一起展示，两行英文太长。」
+截图里是 `...don't know enough vocabulary. The thinking goes, if I just memorize
+more words,` —— 一句 100 多字符，撑成两行压掉半个画面。
+
+根本原因：`subtitles.js` 的 `segment()` 只在**文本结尾**判句末标点
+（`SENT_END = /[.!?。！？…]["'”’)）\]]*\s*$/`）。YouTube 的 cue 边界不可靠，
+经常一条 cue 里塞两句，**中间那个句号完全不起作用** —— 两句被当成一句送去翻译，
+既撑成两行，机翻还会把两个句子的语气混在一起。
+
+修复：新增 `SENT_MID = /[.!?。！？…]["'”’)）\]]*\s+/g` 和 `splitAtSentEnd()`，
+在 `flush()` 里做成**两级切分**：先按句中句号切成真句子，每句仍然过长时再交给
+`splitLong()` 按逗号/空格切。两级都按字符数比例分摊时间轴（否则 `findByTime`
+只会命中第一段，后面几段永远显示不出来）。
+
+两个刻意的选择：
+
+- **冒号不算断句**。`He said: "..."` 这种引语被拆开反而更难读。
+- **`SENT_MID` 必须带 `g` 标志**。第一版漏了 `g`，`exec()` 不前进直接死循环。
+
+**回归测试（`tools/test-split.js`，12 项）**：
+
+```
+✓ S1 句中句号处断开（一句变两句） ["…vocabulary.","The thinking goes, if I just memorize more words,"]
+✓ S5 单句无句号时不拆开 ["this is one single sentence without any period inside it at all"]
+✓ S7 问号/感叹号同样断开 ["Really?","I cannot believe it!","Let us go."]
+✓ S9 引号后的句号断开且引号留在前句 ["He said \"stop.\"","Then he left."]
+✓ S10 断开后时间轴按长度分摊且覆盖原 cue [["0.00","1.11"],["1.11","2.00"]]
+✓ S12 跨 cue 已有句号时各自成句
+```
+
+反向验证：`git stash push subtitles.js` 后跑，`S1`/`S2`/`S3`/`S7`/`S8`/`S9`/`S10`
+共 7 项 FAIL。
+
+**顺带修掉一个测试自身的缺陷。** `test-center.js` 原来只等
+`.trace-sub-box` 挂载就开跑，然后采样 40 拍。但 box 是同步建出来的（bug 13
+让覆盖层不依赖后台设置），字幕却要等 timedtext + 分句完成；MV3 的 service worker
+冷启动偶尔超过 2.5s，那几轮采样全是空文本 → `distinctSentences: 0` → 报一个
+**看起来像「位置漂移」的假失败**（实测约 1/10 概率）。改为先
+`waitForFunction` 等到 `.trace-sub-orig` 真有文本、攒够 4 句就收工（原来固定跑满
+40 拍，19.2s 的夹具视频播完后也在采）。修完连跑 6 次全 PASS。
 
 ### 词形归一化：收藏 beverage，也要高亮 beverages
 
@@ -1666,6 +1821,11 @@ D8 的 `cjkRatio:0.65` 与 `cjkRatioAll:0.34` 之差就是折叠英文释义的�
 **需求**：选中多个词（短语/习语）时给整段释义，并且能作为「短语」条目进生词本；
 选中其中单个词仍走原来的单词卡。
 
+**怎么选中**：用鼠标在字幕上**拖选**多个词即可（浏览器原生选区）。松手就弹短语卡，
+不用再点一次。单点一个词仍然是单词卡 —— 两条路径靠「选区是否覆盖到 2 个以上词」
+区分，见 bug 18。所以字幕原文必须是可选中的（`user-select: text`），
+这一点在 `overlay.css` 里显式声明。
+
 **核心矛盾**：免费机器翻译对习语基本无能为力。实测结论：
 
 | 短语 | Google 整体译文 | 逐词拼接 | 是否可用 |
@@ -1775,7 +1935,7 @@ click 处理器里，且前面不能有 `await`。SW 的消息处理器里调会
 **`test-phrase.js` 的五条大模型断言**（用 `ctx.route()` 伪造 `/chat/completions`）：
 
 ```
-✓ L16b 大模型域名权限已授予（否则走不到 fetch） {"granted":true}
+✓ L16b 大模型域名权限已预置（否则走不到 fetch） {"granted":true}
 ✓ L17 能拉取模型列表 {"ok":true,"data":["fake-1","fake-2"]}
 ✓ L18 大模型引擎能翻出译文 ["现在就支付你的公平。","祝你今天过得愉快。"]
 ✓ L19 请求里带了模型名与 system 提示 {"model":"fake-1","n":2}
@@ -1787,6 +1947,10 @@ L20 是这里最重要的一条：让伪造端点返回 500，断言仍有译文
 
 L16b 是 bug 17 之后补的：`ctx.route()` 只在浏览器网络层拦截，而 `llmChat()`
 会先 `permissions.contains()` 自检，没权限连 `fetch` 都不会发，拦截也就没机会生效。
+这条**曾经写成在扩展页面里裸调 `chrome.permissions.request()`**，结果撞上原生权限
+气泡（Playwright 点不到）→ promise 永远挂着 → 整个测试 600s 超时、一行 RESULT 都没有。
+现在与 `test-llm.js` 共用 `tools/lib/perm-ext.js`：测试时把扩展复制一份、
+把 `llm.test` 预置进 `host_permissions`（等价于用户已点过允许），既不弹框又能跑真 fetch。
 
 ---
 
@@ -1834,9 +1998,11 @@ L16b 是 bug 17 之后补的：`ctx.route()` 只在浏览器网络层拦截，�
   面板或 popup 里「恢复居中」可回到默认底部位置
 - **点击查词**：点字幕里任意单词 → 音标 + 中文词性 + 中文释义 + 本句译文 +
   折叠的英文原文释义（默认收起，因为要的是中文）
-- **短语划词**：选中 `pay your fair` 这类多个词时，点其中任意一个词打开**短语卡** ——
+- **短语划词**：在字幕上用鼠标**拖选** `pay your fair` 这类多个词，松手即弹**短语卡** ——
   整段释义 + 逐词对照 + 误听提示；整段在字幕里作为一个整体高亮。
   机器翻译只是逐词拼接时会显式警示「这句是按词拼出来的」，而不是假装准确
+- **长句自动断开**：一条字幕里塞了两句（中间已有句号）时，在句号处切成两条分别显示，
+  不会连成两行长英文；每段仍按字符比例分摊时间轴，显示时机不重叠
 - **短语生词本**：短语作为独立条目收藏，看板里用引号徽标与「短语」分类区分，不与单词混在一起
 - **生词本**：一键加入，记录单词/释义/**所在句子与译文**/视频标题/时间点，可搜索、删除、
   导出 JSON，点击条目跳回原视频那一秒
@@ -1882,6 +2048,7 @@ node test-dict.js            # 查词卡片中文优先（词性中文 + 释义�
 node test-phrase.js          # 短语整段释义 + 短语生词本 + 大模型引擎与降级
 node test-invisible.js       # 译文里不残留英文（Google 会插零宽空格破坏匹配）
 node test-llm.js             # 大模型配置：手势里申请权限 + 拉模型 + 测试连接 + 后台可用
+node test-split.js           # 句中句号断开 + 单句不拆 + 时间轴分摊 + 跨 cue 合并不回归
 node run-all.js              # 一次跑完以上全部，末尾输出 PASS/FAIL 汇总
 ```
 
@@ -2020,6 +2187,8 @@ D:\MyFiles\项目\Trace\
 ├─ test-phrase.js            短语整段释义 + 短语生词本 + 大模型引擎与降级
 ├─ test-invisible.js         译文里不残留英文（零宽空格破坏匹配）
 ├─ test-llm.js               大模型配置：手势里申请权限 + 拉模型 + 测试连接 + 后台可用
+├─ test-split.js             句中句号断开 + 单句不拆 + 时间轴分摊 + 跨 cue 合并不回归
+├─ lib\perm-ext.js           测试助手：预置 host_permissions，绕开点不到的原生权限弹框
 ├─ run-all.js                一次跑完全部回归，输出汇总表
 ├─ shot-dict.png             查词卡片：本句译作「立即」与单词直译「立即地」并存
 ├─ shot-phrase.png           短语卡：警示条 + 降级释义 + 逐词对照

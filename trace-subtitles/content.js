@@ -70,8 +70,6 @@
     wordSet: new Set(),
     /** 已加入生词本的短语（归一化文本），用于连续多词高亮 */
     phraseSet: [],
-    /** 用户最近一次选中的文本（用于判断"选的是短语还是单词"） */
-    lastSelection: '',
     /** 上一轮翻译实际使用的目标语言（设置晚到时用来判断是否需要重翻） */
     translatedTarget: '',
   };
@@ -987,6 +985,49 @@
       .toLowerCase();
   }
 
+  /**
+   * 从浏览器原生选区里读出「用户到底选中了哪几个词」。
+   *
+   * 为什么需要它：字幕里的每个词都是独立的 <span class="trace-word">，用户用鼠标
+   * 拖过 "dive in" 得到的是一个跨两个 span 的原生选区。旧代码只处理单个词上的
+   * click —— 浏览器在松手时仍会把 click 派发到起始那个词上，于是永远只查一个词，
+   * 短语查询分支虽然写好了（data-p）却永远走不到。
+   *
+   * 短语文本用「被覆盖到的词的原文」拼，而不是直接用 selection.toString()：
+   * 拖选常常带上首尾标点、甚至从词中间开始，直接取会得到 "ive i" 这种垃圾短语。
+   * 吸附到完整词之后，查的就是用户眼睛看到的那个短语。
+   *
+   * 判定条件（全部满足才当成短语）：
+   *   1. 选区非折叠，且覆盖到至少 2 个 .trace-word
+   *   2. 选区完整落在覆盖层内部，避免误抓页面上别处的选中文本
+   *   3. 覆盖到的词都带 data-w
+   *
+   * 返回 { phrase, rect }；不满足条件返回 null。
+   */
+  function phraseFromSelection() {
+    try {
+      const sel = window.getSelection();
+      if (!sel || sel.isCollapsed || !sel.rangeCount) return null;
+      const root = overlayEl;
+      if (!root) return null;
+      const range = sel.getRangeAt(0);
+      // 选区的两端都必须在覆盖层内
+      if (!root.contains(range.startContainer) || !root.contains(range.endContainer)) return null;
+      // 必须有 2 个以上完整词被覆盖到（单点/双击选一个词时不走这里）
+      const words = [...root.querySelectorAll('.trace-word')].filter((w) =>
+        range.intersectsNode(w)
+      );
+      if (words.length < 2) return null;
+      if (words.some((w) => !w.dataset.w)) return null;
+      const phrase = normPhrase(words.map((w) => w.textContent).join(' '));
+      if (!phrase || !phrase.includes(' ')) return null;
+      const rect = range.getBoundingClientRect();
+      return { phrase, rect: rect && rect.width ? rect : null };
+    } catch (_) {
+      return null;
+    }
+  }
+
   /** 把原文拆成可点击的单词 span，保留标点；已加入生词本的单词额外加 trace-saved */
   function renderWords(text) {
     const toks = text.split(/(\s+)/);
@@ -1483,8 +1524,8 @@
   // 「pay your fair」这种习语被拆成三个独立词义，等于没解释。
 
   /** 短语卡片：整段释义（大模型优先）+ 逐词对照 + 本句译文 */
-  async function showPhraseCard(phrase, el) {
-    const rect = el.getBoundingClientRect();
+  async function showPhraseCard(phrase, el, rectOverride) {
+    const rect = rectOverride || el.getBoundingClientRect();
     const pop = ensurePopup();
     const norm = normPhrase(phrase);
     const ctx = state.active?.text || '';
@@ -1603,6 +1644,16 @@
 
   async function onWordClick(ev) {
     if (!state.settings?.clickWord) return;
+
+    // 短语分支 0：用户用鼠标拖选了多个词。
+    // 这条必须在"取最近 .trace-word"之前判断 —— 拖选结束时浏览器仍会把 click
+    // 派发给起始词，先取 el 就永远走单词语义，短语功能形同不存在。
+    const selPhrase = phraseFromSelection();
+    if (selPhrase) {
+      const anchor = ev.target.closest('.trace-word, .trace-saved-zh') || origEl;
+      return showPhraseCard(selPhrase.phrase, anchor, selPhrase.rect);
+    }
+
     // 英文词（.trace-word）和译文里高亮的中文（.trace-saved-zh）都能点，
     // 两者都带 data-w = 英文原词，所以打开的是同一张生词卡。
     const el = ev.target.closest('.trace-word, .trace-saved-zh');
@@ -1897,6 +1948,28 @@
       /* 忽略：高亮是增强功能，失败不影响字幕 */
     }
   }
+
+  /**
+   * 拖选结束时补一次「短语查询」。
+   *
+   * 为什么不能只靠 click：实测（Playwright + 真实 Chrome）用鼠标从 "dive" 拖到
+   * "in"，mouseup 之后浏览器派发的 click 目标会是**共同祖先**（覆盖层容器），
+   * 不是起始词，所以 `ev.target.closest('.trace-word')` 取不到任何词 ——
+   * 旧代码在这种情况下直接 return，什么也不弹。用户看到的就是"选中了短语但没反应"。
+   *
+   * 因此在 mouseup 处主动判一次选区。单点一个词时选区是折叠的，
+   * phraseFromSelection() 返回 null，不会干扰原有的单词点击路径。
+   */
+  document.addEventListener('mouseup', () => {
+    if (!state.settings?.clickWord) return;
+    // 等浏览器把选区状态落定（mouseup 当次读到的 selection 可能还没更新）
+    setTimeout(() => {
+      const sel = phraseFromSelection();
+      if (!sel) return;
+      const anchor = sel.rect ? { getBoundingClientRect: () => sel.rect } : origEl;
+      showPhraseCard(sel.phrase, anchor, sel.rect);
+    }, 0);
+  });
 
   document.addEventListener('click', (e) => {
     if (popupEl && !popupEl.classList.contains('trace-hidden')) {
