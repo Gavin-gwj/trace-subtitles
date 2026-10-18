@@ -230,7 +230,7 @@ function check(name, ok, extra) {
   await page2.goto(WATCH, { waitUntil: 'domcontentloaded', timeout: 60000 });
 
   let auto = { present: false };
-  for (let i = 0; i < 30; i++) {
+  for (let i = 0; i < 40; i++) {
     await page2.waitForTimeout(600);
     auto = await page2
       .evaluate(() => {
@@ -243,7 +243,9 @@ function check(name, ok, extra) {
         };
       })
       .catch((e) => ({ present: false, err: e.message }));
-    if (auto.present && auto.orig) break;
+    // 必须等译文也出来才退出：原文是本地渲染（立刻就有），译文要等网络往返，
+    // 只等 orig 会在翻译还没回来时就 break，C3 随机失败。
+    if (auto.present && auto.orig && auto.trans) break;
   }
   console.log('auto-load:', JSON.stringify(auto));
   check('C1 新标签页无需点插件就出现字幕层', auto.present, auto);

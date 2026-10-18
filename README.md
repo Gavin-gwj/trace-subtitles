@@ -190,11 +190,11 @@ AI 总结
 | `main-world.js` | 跑在页面主世界：读 `getPlayerResponse()` / `getOption('captions','tracklist')`，`fetch` 字幕正文，`postMessage` 桥接 |
 | `subtitles.js` | 纯函数库：`parse()`（json3/srv3）、`segment()`（智能分句）、`hash()`、`findByTime()`、`wordForms()`（词形归一化） |
 | `content.js` | 隔离世界主控：轨道选择、批量翻译、双层字幕渲染、rAF 推进、点词、查词弹窗、生词高亮（含词形变化）、悬浮按钮与页内面板 |
-| `bg.js` | Service Worker：设置、翻译（Google + MyMemory 降级）、词典、IndexedDB 缓存与生词本、哨兵对齐（`markWords` / `parseMarked`） |
+| `bg.js` | Service Worker：设置、翻译（Google + MyMemory 降级）、词典、IndexedDB 缓存与生词本、哨兵对齐（`markWords` / `parseMarked`）、**备份/恢复落盘** |
 | `overlay.css` | 字幕覆盖层 + 查词弹窗 + 悬浮按钮 + 页内设置面板样式 |
 | `theme.css` | **共享设计系统**（墨黑分层底 + 暖金强调 + 字体/圆角/按钮/卡片原子类），被 popup 与词库页共用 |
 | `popup.html` / `popup.js` | 工具栏弹窗：设置 + 生词本精简列表 |
-| `wordbook.html` / `wordbook.js` | **词库看板**（独立页面）：KPI、学习状态环、每日新增柱状图、筛选/搜索/抽屉/复习/删除 |
+| `wordbook.html` / `wordbook.js` | **词库看板**（独立页面）：KPI、学习状态环、每日新增柱状图、筛选/搜索/抽屉/复习/删除、**备份与恢复**（含自选文件夹） |
 | `icons/` | 4 个尺寸图标（纯 Node zlib 手写 PNG 生成） |
 
 ### 三个技术要点
@@ -943,6 +943,81 @@ function niceScale(raw) {
 2. 数值列宽度不固定时，`55%` 和 `28` 混排会让右缘左右微抖；给 `.tp-val` 固定
    `width: 36px` + `text-align: right` 后，所有控件右缘落在同一条线上。
 
+### 生词本落盘：卸载重装后数据还在
+
+IndexedDB 与 `storage.local` 都活在扩展的存储分区里，**卸载扩展时 Chrome 会连数据一起清掉**
+—— 这不是 bug，是浏览器的设计，扩展侧无法阻止。所以想让生词本活过重装，只有一个方向：
+把数据写成扩展目录**之外**的普通文件。
+
+实现是「一个文件 + 双向同步」：
+
+| 动作 | 行为 |
+|---|---|
+| 加词 / 删词 / 复习 | 若开了自动备份，静默覆盖写同一个文件（不堆副本） |
+| 「备份到文件」 | 立即写一次，toast 报出写到了哪个目录、几个词 |
+| 「恢复」 | 读文件 → 与现有数据**合并**：同词取复习次数更高的、`createdAt` 取更早的，不产生重复词条 |
+| 「选择备份文件夹」 | 用 `showDirectoryPicker()` 让用户指定目录，之后所有备份都写那里 |
+
+写文件有两条路，优先走前者：
+
+1. **用户选定的目录**（File System Access API）—— 用 `FileSystemDirectoryHandle` 直接
+   `getFileHandle('trace-vocab-backup.json', {create:true})` 再 `createWritable()` 写入。
+   位置由用户定，重装扩展后重新选同一个目录就能恢复。
+2. **兜底：`chrome.downloads`** —— 没选目录时下载到浏览器默认下载目录。
+   需要一个 `chrome.downloads` 权限，且**文件名重复时 Chrome 会自动加 `(1)` `(2)`**，
+   所以用 `conflictAction: 'overwrite'` 明确覆盖。
+
+**这里踩了一个架构级的坑，值得单独记**：
+
+> `FileSystemDirectoryHandle` **不能通过 `chrome.runtime.sendMessage` 传递**。
+
+消息通道走结构化克隆，句柄传过去会变成**空壳** —— 方法全丢，连 `.name` 都读不到：
+
+```
+S21 选定目录后后台能看到句柄  ✗  name: ""
+S23 备份走的是用户选定的目录  ✗  handle.getFileHandle is not a function
+```
+
+而探针里明明能跑通，因为探针是**页面自己**把句柄写进 IndexedDB 的。
+正确做法是把这一步留在页面侧：
+
+```js
+// wordbook.js —— 页面自己把句柄写进扩展的 IndexedDB（同一 origin，后台能读到）
+const handle = await showDirectoryPicker({ id: 'trace-backup', mode: 'readwrite' });
+await saveDirHandleToIDB(handle);                                  // 句柄直接入库
+await chrome.runtime.sendMessage({ type: 'backup:set-dir', name: handle.name });  // 只传名字
+```
+
+后台的 `backup:set-dir` 因此**只记录名字**用于界面显示，真正的句柄由后台从 IndexedDB
+自己取。同理 `backup:clear-dir` 也是页面先删库里的句柄、再通知后台清名字。
+
+其余三个细节：
+
+- **权限会退化**：浏览器重启后 `queryPermission({mode:'readwrite'})` 可能回到 `prompt`，
+  此时静默写入会抛错。所以 `backup:get-dir` 会返回 `permission` 字段，界面提示
+  「权限已失效，点上方重新选择」，而不是静默失败。
+- **恢复要合并不要覆盖**：直接覆盖会丢掉「这次装上新版之后又加的词」。合并规则是
+  `reviewCount` 取大、`createdAt` 取小 —— 学习进度不能倒退，加入时间要保留最初那次。
+- **测试里造句柄的方式**：`test-backup.js` 用 OPFS（`navigator.storage.getDirectory()`）
+  造一个真句柄，再按上面的正确姿势写进 IndexedDB，这样能验证「句柄存库 → SW 写文件」
+  整条链路，而不依赖原生选择框（自动化里点不出来）。
+
+实测（`node test-backup.js`，28 项）：
+
+```
+S3  备份了 5 个单词
+S4  备份文件真的存在于磁盘
+S12 恢复保住了复习进度（reviewCount=2）
+S13 恢复保住了原始加入时间
+S14 重复恢复不会产生重复词条
+S15 合并时保留更高的复习次数（不倒退）
+S23 备份走的是用户选定的目录（不是下载目录）
+S26 重复备份覆盖同一文件（不堆副本）
+S27 卸载后能从用户目录里的备份直接恢复
+S28 清除目录后自动退回下载目录
+RESULT: PASS（生词本写成本机文件 + 卸载重装后可恢复 + 合并保留学习进度）
+```
+
 ---
 
 ## 三、安装与使用
@@ -978,6 +1053,9 @@ function niceScale(raw) {
 - **点击查词**：点字幕里任意单词 → 音标 + 中文释义 + 英文释义 + 例句
 - **生词本**：一键加入，记录单词/释义/**所在句子与译文**/视频标题/时间点，可搜索、删除、
   导出 JSON，点击条目跳回原视频那一秒
+- **生词本落盘**：可指定本机任意文件夹作为备份目录，加词/删词/复习后自动覆盖写
+  `trace-vocab-backup.json`（不堆副本）；**卸载扩展重装后点「恢复」即可找回全部单词**，
+  合并时保留更高的复习次数与最早的加入时间。没选目录时退化为下载到「下载」文件夹
 - **词库看板**（独立页面）：KPI 概览、学习状态环、每日新增柱状图（日/周/月）、状态筛选、
   搜索、单词抽屉（所在句子 + 跳回视频）、复习与删除 —— 数据全在本机，离线可用
 - **生词高亮（跨视频生效）**：任何已加入生词本的单词，在**所有** YouTube 视频的字幕里都会
@@ -1010,6 +1088,7 @@ node test-wordbook.js        # 词库看板：KPI/状态环/柱状图/筛选/搜
 node test-frame.js           # 字幕贴视频框 + 全屏等比放大 + 退全屏缩回，截图 shot-frame-*.png
 node test-settings.js        # MyMemory 额度降级 + 引擎切换缓存 + 免点插件自动出字幕
 node test-forms.js           # 词形归一化：收藏 beverage 也高亮 beverages，点复数开同一词条
+node test-backup.js          # 生词本写本机文件 + 卸载重装后恢复 + 合并保留学习进度
 ```
 
 `tools/mock/` 用 Playwright `page.route()` 整体伪造 `https://www.youtube.com/**`，
@@ -1134,6 +1213,7 @@ D:\MyFiles\项目\Trace\
    ├─ test-wordbook.js          词库看板回归测试（KPI/图表/筛选/抽屉/复习）
    ├─ test-frame.js             字幕贴视频框 + 全屏等比放大回归测试
    ├─ test-forms.js             词形归一化回归（单复数同高亮 + 两份实现一致性）
+   ├─ test-backup.js            生词本落盘回归（写文件/卸载恢复/合并进度/自选目录）
    ├─ probe-ext2\               主世界 vs 隔离世界对照实验
    ├─ probe-transcript.js       get_transcript 接口探针
    ├─ gen-icons.js              纯 Node 生成 PNG 图标
@@ -1150,7 +1230,9 @@ D:\MyFiles\项目\Trace\
    ├─ shot-glass.png            毛玻璃 + 3 点拖动胶囊截图
    ├─ shot-forms.png            复数形式高亮 + 单数词卡截图
    ├─ test-settings.js          MyMemory 降级 / 引擎切换缓存 / 自动出字幕回归
-   └─ shot-settings.png         自动出字幕截图（未点插件）
+   ├─ shot-settings.png         自动出字幕截图（未点插件）
+   ├─ shot-backup.png           词库页备份区截图（选目录 + 自动备份开关）
+   └─ (以上测试每次跑完自动生成对应截图)
 ```
 
 ## 五、与 Trancy 的差距

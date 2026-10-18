@@ -787,6 +787,91 @@
         width: 100%;
       }
     }
+
+    /* 侧栏备份区 */
+    .side-backup {
+      padding: 2px 12px 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 7px;
+    }
+    .bk-dir {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      width: 100%;
+      padding: 7px 10px;
+      border-radius: var(--r-sm);
+      border: 1px dashed var(--line-2);
+      background: transparent;
+      color: var(--text-2);
+      font: 500 11.5px/1.4 var(--font-body);
+      cursor: pointer;
+      text-align: left;
+      transition: border-color 0.15s var(--ease-io), color 0.15s var(--ease-io),
+        background 0.15s var(--ease-io);
+    }
+    .bk-dir:hover {
+      border-color: var(--gold-line);
+      color: var(--text-1);
+      background: var(--gold-soft);
+    }
+    .bk-dir.set {
+      border-style: solid;
+      border-color: var(--line-3);
+      color: var(--text-1);
+    }
+    .bk-dir svg {
+      flex: none;
+      opacity: 0.85;
+    }
+    .bk-dir span {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .bk-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      font: 500 12px/1.4 var(--font-body);
+      color: var(--text-2);
+      cursor: pointer;
+      padding: 2px 0;
+    }
+    .bk-hint {
+      font: 400 10.5px/1.45 var(--font-body);
+      color: var(--text-3);
+    }
+
+    /* 轻提示：备份 / 恢复的结果反馈 */
+    #wb-toast {
+      position: fixed;
+      left: 50%;
+      bottom: 28px;
+      transform: translate(-50%, 14px);
+      z-index: 90;
+      max-width: min(560px, calc(100vw - 48px));
+      padding: 11px 18px;
+      border-radius: var(--r-md);
+      background: var(--ink-3);
+      border: 1px solid var(--line-2);
+      box-shadow: 0 14px 40px rgba(0, 0, 0, 0.55);
+      color: var(--text-1);
+      font: 500 12.5px/1.5 var(--font-body);
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.18s var(--ease), transform 0.18s var(--ease);
+    }
+    #wb-toast.on {
+      opacity: 1;
+      transform: translate(-50%, 0);
+    }
+    #wb-toast[data-kind='err'] {
+      border-color: rgba(242, 85, 90, 0.42);
+      color: #ffb4b6;
+    }
   </style>
 </head>
 <body>
@@ -819,9 +904,24 @@
       </button>
     </div>
 
+    <div class="side-label">备份</div>
+    <div class="side-backup">
+      <button class="bk-dir" id="pickDirBtn">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
+        <span id="pickDirLabel">选择备份文件夹</span>
+      </button>
+      <div class="bk-hint" id="bkHint">还没选目录，备份会存到「下载」</div>
+      <label class="bk-row">
+        <span>自动备份</span>
+        <span class="switch"><input type="checkbox" id="autoBackup" /><span class="track"></span></span>
+      </label>
+      <div class="bk-hint">加词、删词、复习后自动覆盖同一个文件</div>
+    </div>
+
     <div class="side-foot">
-      数据保存在本机 IndexedDB<br />
-      不上传、不同步、可随时导出
+      数据保存在本机 IndexedDB；选定文件夹后会额外<br />
+      写一份 <code>trace-wordbook-backup.json</code> 到那里，<br />
+      卸载扩展重装后用「恢复」找回
     </div>
   </aside>
 
@@ -833,7 +933,9 @@
       </div>
       <div class="top-tools">
         <input class="input" type="search" id="q" placeholder="搜索单词 / 释义 / 上下文…" />
+        <button class="btn btn-ghost" id="restoreBtn" title="从备份 JSON 恢复生词本">恢复</button>
         <button class="btn btn-ghost" id="exportBtn">导出</button>
+        <button class="btn btn-primary" id="backupBtn" title="把生词本写成本机文件，卸载扩展也不会丢">备份到文件</button>
       </div>
     </div>
 

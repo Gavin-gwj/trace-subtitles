@@ -20,3 +20,5 @@ Thumbs.db
 
 # 日志
 *.log
+tools/.ext-*/
+tools/.cm.txt

@@ -29,6 +29,13 @@ const DEFAULT_SETTINGS = {
   radius: 12, // 圆角 px
   blur: 18, // 高斯模糊 px
   showLauncher: true, // 播放器右下角悬浮按钮
+  // ---- 生词本备份 ----
+  // Chrome 卸载扩展时会清空 IndexedDB，所以生词本要额外落一份 JSON 到
+  // 「下载/trace-subtitles/wordbook-backup.json」。默认开，改动后自动覆盖。
+  autoBackup: true,
+  autoBackupFails: 0, // 连续失败次数，达 3 次自动关闭 autoBackup
+  lastBackupAt: 0, // 上次自动备份时间戳，用于节流
+  backupDirName: '', // 用户选定的备份目录名（空=还没选，退回「下载」目录）
 };
 
 // ---------------------------------------------------------------- 网络工具
@@ -65,7 +72,7 @@ async function setSettings(patch) {
 // ---------------------------------------------------------------- IndexedDB
 
 const DB_NAME = 'trace-subs';
-const DB_VER = 1;
+const DB_VER = 2;
 let dbPromise = null;
 
 function openDB() {
@@ -81,6 +88,12 @@ function openDB() {
       if (!db.objectStoreNames.contains('words')) {
         const w = db.createObjectStore('words', { keyPath: 'word' });
         w.createIndex('createdAt', 'createdAt');
+      }
+      // v2：存「用户选定的备份目录」句柄（FileSystemDirectoryHandle）。
+      // 句柄本身是可结构化克隆的，能直接放进 IndexedDB，
+      // 之后 Service Worker 取出来就能静默读写那个目录。
+      if (!db.objectStoreNames.contains('meta')) {
+        db.createObjectStore('meta', { keyPath: 'key' });
       }
     };
     req.onsuccess = () => resolve(req.result);
@@ -994,6 +1007,7 @@ async function addWord(payload) {
     status: existing ? existing.status || 'new' : 'new',
   };
   await idbPut('words', rec);
+  scheduleAutoBackup();
   return rec;
 }
 
@@ -1035,9 +1049,50 @@ async function broadcastWordsChanged() {
   }
 }
 
+// ---------------------------------------------------------------- 自动备份节流
+//
+// 生词变动（加词/删词/复习）都会触发备份，但用户可能连续点好几个词，
+// 每次都下载一个文件会刷屏。所以合并成一次：30 秒内最多写一次盘。
+//
+// 另一个真实风险：Chrome 设置里若开了「下载前询问每个文件的保存位置」，
+// chrome.downloads.download 即使 saveAs:false 也可能弹框。自动备份反复弹框
+// 比不备份还糟，所以连续失败 3 次就自动关掉自动备份（只留手动备份）。
+
+let autoBackupTimer = null;
+const AUTO_BACKUP_GAP = 30000;
+const AUTO_BACKUP_MAX_FAILS = 3;
+
+function scheduleAutoBackup() {
+  if (autoBackupTimer) clearTimeout(autoBackupTimer);
+  autoBackupTimer = setTimeout(async () => {
+    autoBackupTimer = null;
+    try {
+      const st = await getSettings();
+      if (st.autoBackup === false) return;
+      const last = st.lastBackupAt || 0;
+      if (Date.now() - last < AUTO_BACKUP_GAP) return;
+      await backupToFile();
+      await setSettings({ lastBackupAt: Date.now(), autoBackupFails: 0 });
+    } catch (e) {
+      // 自动备份失败不打扰用户（可能是权限被拒、下载被拦、或弹框被取消），
+      // 手动点「备份到文件」时会拿到明确报错。
+      const st = await getSettings().catch(() => ({}));
+      const fails = (st.autoBackupFails || 0) + 1;
+      console.warn(`[Trace bg] 自动备份失败（第 ${fails} 次）`, e && e.message);
+      if (fails >= AUTO_BACKUP_MAX_FAILS) {
+        await setSettings({ autoBackup: false, autoBackupFails: fails }).catch(() => {});
+        console.warn('[Trace bg] 自动备份连续失败，已自动关闭；可在词库页手动备份');
+      } else {
+        await setSettings({ autoBackupFails: fails }).catch(() => {});
+      }
+    }
+  }, 1500);
+}
+
 async function removeWord(word) {
   await idbDel('words', String(word).toLowerCase());
   await broadcastWordsChanged();
+  scheduleAutoBackup();
   return true;
 }
 
@@ -1049,12 +1104,232 @@ async function reviewWord(word) {
   rec.lastReview = Date.now();
   rec.status = rec.reviewCount >= 3 ? 'learned' : 'learning';
   await idbPut('words', rec);
+  scheduleAutoBackup();
   return rec;
 }
 
 async function exportWords() {
   const all = await listWords();
   return all;
+}
+
+// ---------------------------------------------------------------- 本地文件备份
+//
+// 为什么需要这一层：Chrome 在扩展被卸载/移除时会清空该扩展的 IndexedDB 与
+// storage.local（浏览器机制，扩展侧无法阻止）。所以「卸载旧插件、装新插件」
+// 必然丢数据。唯一能让数据活过卸载的办法，是写到扩展目录之外的普通文件里。
+//
+// 两种落盘方式，按优先级：
+//   1. 用户选定的目录（File System Access）：页面用 showDirectoryPicker 选一个
+//      文件夹，句柄存进 IndexedDB 的 meta store。SW 没有 showDirectoryPicker，
+//      但**能用页面存下的句柄**（已实测 queryPermission:granted、写入成功），
+//      所以自动备份也能静默写进那个目录，不弹任何框。这是首选。
+//   2. 兜底：chrome.downloads + data URL 写进「下载」目录。MV3 的 SW 没有
+//      URL.createObjectURL，但 data: URL 可以下载（已实测 state:complete）。
+//      缺点：只能进「下载」，且若 Chrome 开了「下载前询问」可能弹框。
+
+const BACKUP_FILE = 'trace-subtitles/wordbook-backup.json';
+/** 用户目录里用的文件名（直接放在所选目录根下，不再套子目录） */
+const BACKUP_BASENAME = 'trace-wordbook-backup.json';
+
+/** 读出用户选定的备份目录句柄（没有则 null） */
+async function getBackupDirHandle() {
+  try {
+    const rec = await idbGet('meta', 'backupDir');
+    return (rec && rec.handle) || null;
+  } catch (_) {
+    return null;
+  }
+}
+
+/** 保存用户选定的备份目录句柄；传 null 表示清除 */
+async function setBackupDirHandle(handle, name) {
+  if (!handle) {
+    await idbDel('meta', 'backupDir');
+    await setSettings({ backupDirName: '' });
+    return { ok: true, cleared: true };
+  }
+  // 尽量要读写权限（页面里刚选的句柄通常已 granted）
+  let perm = 'prompt';
+  try {
+    perm = await handle.queryPermission({ mode: 'readwrite' });
+    if (perm !== 'granted') perm = await handle.requestPermission({ mode: 'readwrite' });
+  } catch (_) {
+    /* 权限查询失败就照存，写入时再报错 */
+  }
+  await idbPut('meta', { key: 'backupDir', handle, name: name || handle.name || '' });
+  await setSettings({ backupDirName: name || handle.name || '' });
+  return { ok: perm === 'granted', permission: perm, name: name || handle.name || '' };
+}
+
+/** 把 JSON 写进用户选定的目录；返回 { ok, filename } 或抛错 */
+async function writeBackupToDir(json) {
+  const handle = await getBackupDirHandle();
+  if (!handle) return null;
+  // 权限可能因为浏览器重启而退化为 prompt，这里再确认一次
+  let perm = 'granted';
+  try {
+    perm = await handle.queryPermission({ mode: 'readwrite' });
+    if (perm !== 'granted') perm = await handle.requestPermission({ mode: 'readwrite' });
+  } catch (_) {}
+  if (perm !== 'granted') {
+    throw new Error('备份目录权限已失效，请在词库页重新选择目录');
+  }
+  const fh = await handle.getFileHandle(BACKUP_BASENAME, { create: true });
+  const w = await fh.createWritable();
+  await w.write(json);
+  await w.close();
+  return { ok: true, filename: `${handle.name || ''}/${BACKUP_BASENAME}` };
+}
+
+function toBase64Utf8(str) {
+  const bytes = new TextEncoder().encode(str);
+  let bin = '';
+  // 分块，避免 apply 参数过多导致栈溢出（生词多时 JSON 会很大）
+  const CH = 0x8000;
+  for (let i = 0; i < bytes.length; i += CH) {
+    bin += String.fromCharCode.apply(null, bytes.subarray(i, i + CH));
+  }
+  return btoa(bin);
+}
+
+function fromBase64Utf8(b64) {
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return new TextDecoder().decode(bytes);
+}
+
+/** 把生词本 + 设置序列化成备份对象 */
+async function buildBackup() {
+  return {
+    format: 'trace-subtitles-backup',
+    version: 1,
+    exportedAt: new Date().toISOString(),
+    settings: await getSettings(),
+    words: await listWords(),
+  };
+}
+
+/**
+ * 写一份备份。
+ * 优先写进用户选定的目录（静默、可指定位置）；没有选就退回「下载」目录。
+ * 返回 { ok, filename, relPath, via, count, at }
+ */
+async function backupToFile() {
+  const data = await buildBackup();
+  const json = JSON.stringify(data, null, 2);
+
+  // 1) 用户选定的目录
+  try {
+    const r = await writeBackupToDir(json);
+    if (r) {
+      return {
+        ok: true,
+        filename: r.filename,
+        relPath: BACKUP_BASENAME,
+        via: 'dir',
+        count: data.words.length,
+        at: Date.now(),
+      };
+    }
+  } catch (e) {
+    // 选了目录但写失败（权限失效等）：不静默退回下载，否则用户以为写到自己目录了
+    throw e;
+  }
+
+  // 2) 兜底：下载目录
+  const url = 'data:application/json;base64,' + toBase64Utf8(json);
+  const id = await chrome.downloads.download({
+    url,
+    filename: BACKUP_FILE,
+    conflictAction: 'overwrite',
+    saveAs: false,
+  });
+  // 等下载真正完成，才能回报准确的落盘路径
+  const final = await new Promise((resolve) => {
+    const t0 = Date.now();
+    const tick = async () => {
+      const [item] = await chrome.downloads.search({ id });
+      if (item && item.state !== 'in_progress') return resolve(item);
+      if (Date.now() - t0 > 8000) return resolve(item || null);
+      setTimeout(tick, 120);
+    };
+    tick();
+  });
+  if (final && final.state === 'interrupted') {
+    throw new Error(final.error || 'download interrupted');
+  }
+  return {
+    ok: true,
+    filename: (final && final.filename) || BACKUP_FILE,
+    // 给界面用的短路径（下载目录内相对位置），避免 toast 里塞上百字符的绝对路径
+    relPath: BACKUP_FILE,
+    via: 'download',
+    count: data.words.length,
+    at: Date.now(),
+  };
+}
+
+/** 从用户选定的目录读回备份对象（没有目录或没文件则返回 null） */
+async function readBackupFromDir() {
+  const handle = await getBackupDirHandle();
+  if (!handle) return null;
+  try {
+    const fh = await handle.getFileHandle(BACKUP_BASENAME);
+    const f = await fh.getFile();
+    const text = await f.text();
+    return JSON.parse(text);
+  } catch (_) {
+    return null;
+  }
+}
+
+/**
+ * 从备份对象恢复：合并进 IndexedDB（同名 key 用备份里的覆盖，但保留
+ * 本地更早的 createdAt 与更高的 reviewCount，避免恢复把学习进度清零）。
+ */
+async function restoreFromBackup(data, opts = {}) {
+  if (!data || data.format !== 'trace-subtitles-backup' || !Array.isArray(data.words)) {
+    throw new Error('不是有效的 Trace 生词本备份文件');
+  }
+  const replace = opts.replace === true;
+  if (replace) {
+    const db = await openDB();
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction('words', 'readwrite');
+      tx.objectStore('words').clear();
+      tx.oncomplete = () => resolve(true);
+      tx.onerror = () => reject(tx.error);
+    });
+  }
+  let added = 0, merged = 0;
+  for (const w of data.words) {
+    if (!w || !w.word) continue;
+    const key = String(w.word).toLowerCase();
+    const old = await idbGet('words', key);
+    if (old) {
+      // 保留本地学习进度：取两者中更早的加入时间、更晚的复习时间、更高的复习次数
+      merged++;
+      await idbPut('words', {
+        ...w,
+        word: key,
+        createdAt: Math.min(old.createdAt || Infinity, w.createdAt || Infinity) || Date.now(),
+        reviewCount: Math.max(old.reviewCount || 0, w.reviewCount || 0),
+        lastReview: Math.max(old.lastReview || 0, w.lastReview || 0) || null,
+        status:
+          (old.reviewCount || 0) >= (w.reviewCount || 0) ? old.status || 'new' : w.status || 'new',
+      });
+    } else {
+      added++;
+      await idbPut('words', { ...w, word: key });
+    }
+  }
+  if (data.settings && typeof data.settings === 'object') {
+    await setSettings(data.settings);
+  }
+  await broadcastWordsChanged();
+  return { ok: true, added, merged, total: data.words.length };
 }
 
 // ---------------------------------------------------------------- 消息路由
@@ -1159,6 +1434,71 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             sendResponse({ ok: false, error: String((e && e.message) || e) });
           }
           break;
+        case 'backup:save':
+          // 手动备份：写进用户选定的目录，没选就退回「下载」
+          sendResponse({ ok: true, data: await backupToFile() });
+          break;
+        case 'backup:set-dir':
+          // 页面已经把目录句柄自己写进 IndexedDB（句柄过不了消息通道），
+          // 这里只记录名字用于界面显示。
+          sendResponse({
+            ok: true,
+            data: await (async () => {
+              const h = await getBackupDirHandle();
+              const name = msg.name || (h && h.name) || '';
+              await setSettings({ backupDirName: name });
+              return { has: !!h, name };
+            })(),
+          });
+          break;
+        case 'backup:get-dir':
+          // 返回目录名与当前权限状态（浏览器重启后权限可能退化为 prompt）
+          sendResponse({
+            ok: true,
+            data: await (async () => {
+              const h = await getBackupDirHandle();
+              if (!h) return { has: false };
+              let perm = 'prompt';
+              try {
+                perm = await h.queryPermission({ mode: 'readwrite' });
+              } catch (_) {}
+              const st = await getSettings();
+              return {
+                has: true,
+                // 句柄本身读不到 name 时（极少数情况）退回设置里记的名字
+                name: h.name || st.backupDirName || '已选文件夹',
+                permission: perm,
+              };
+            })(),
+          });
+          break;
+        case 'backup:clear-dir':
+          // 句柄由页面从 IndexedDB 删除（同一源，页面能直接操作），
+          // 这里只清设置里的名字。
+          await setSettings({ backupDirName: '' });
+          sendResponse({ ok: true, data: { cleared: true } });
+          break;
+        case 'backup:restore':
+          // 从备份对象恢复（内容由词库页读文件后传进来）
+          sendResponse({ ok: true, data: await restoreFromBackup(msg.data, { replace: msg.replace === true }) });
+          break;
+        case 'backup:read-dir':
+          // 直接读用户目录里的备份文件（恢复时优先用它，省得用户再选文件）
+          sendResponse({ ok: true, data: await readBackupFromDir() });
+          break;
+        case 'backup:auto':
+          // 自动备份：仅在「自动备份」开关打开时执行，失败静默（不打扰用户）
+          try {
+            const st = await getSettings();
+            if (st.autoBackup === false) {
+              sendResponse({ ok: true, data: { skipped: true } });
+              break;
+            }
+            sendResponse({ ok: true, data: await backupToFile() });
+          } catch (e) {
+            sendResponse({ ok: false, error: String((e && e.message) || e) });
+          }
+          break;
         default:
           sendResponse({ ok: false, error: 'unknown message: ' + msg.type });
       }
@@ -1205,8 +1545,16 @@ globalThis.__traceDebug = {
   wordKeys,
   hasWord,
   removeWord,
+  reviewWord,
   /** 测试辅助：直接改设置（与 'settings:set' 消息等价） */
   setSettings,
   /** 测试辅助：与消息路由 'word:remove' 同一条路径（删除 + 广播） */
   removeWordNotify: (word) => removeWord(word),
+  /** 本地文件备份：写一份 JSON 到用户选定的目录（没选则「下载」） */
+  backupToFile,
+  restoreFromBackup,
+  buildBackup,
+  getBackupDirHandle,
+  setBackupDirHandle,
+  readBackupFromDir,
 };

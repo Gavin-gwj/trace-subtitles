@@ -587,6 +587,226 @@ $('exportBtn').addEventListener('click', async () => {
   setTimeout(() => URL.revokeObjectURL(url), 2000);
 });
 
+// ---------------------------------------------------------------- 备份 / 恢复
+//
+// 生词本原本只存在扩展自己的 IndexedDB 里，Chrome 一卸载扩展就清空。
+// 所以这里提供「写成本机文件」+「从文件恢复」：
+//   - 备份：由后台调 chrome.downloads 写到 下载/trace-subtitles/wordbook-backup.json
+//   - 恢复：读用户选的文件（或自动去找那份固定备份），合并回 IndexedDB
+
+function toast(text, kind = 'ok') {
+  let el = document.getElementById('wb-toast');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'wb-toast';
+    document.body.appendChild(el);
+  }
+  el.textContent = text;
+  el.dataset.kind = kind;
+  el.classList.add('on');
+  clearTimeout(el._t);
+  el._t = setTimeout(() => el.classList.remove('on'), 3200);
+}
+
+$('backupBtn').addEventListener('click', async () => {
+  const btn = $('backupBtn');
+  const old = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = '备份中…';
+  try {
+    const r = await chrome.runtime.sendMessage({ type: 'backup:save' });
+    if (r && r.ok) {
+      // 写到用户选的目录时只显示文件夹名；退回「下载」时才显示相对路径。
+      // 绝不显示绝对路径：动辄上百字符，toast 会横跨词表把内容盖住。
+      const where =
+        r.data.via === 'dir'
+          ? `「${(r.data.filename || '').split('/')[0] || '已选文件夹'}」`
+          : `下载/${r.data.relPath || 'trace-subtitles/wordbook-backup.json'}`;
+      toast(`已备份 ${r.data.count} 个单词 → ${where}`);
+      await refreshDirUI();
+    } else {
+      toast('备份失败：' + ((r && r.error) || '未知错误'), 'err');
+    }
+  } catch (e) {
+    toast('备份失败：' + ((e && e.message) || e), 'err');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = old;
+  }
+});
+
+/** 把备份对象送进后台恢复 */
+async function doRestore(data, replace) {
+  const r = await chrome.runtime.sendMessage({ type: 'backup:restore', data, replace });
+  if (!r || !r.ok) throw new Error((r && r.error) || '恢复失败');
+  return r.data;
+}
+
+// ---- 备份目录：选文件夹 + 显示状态 ----
+
+/**
+ * 把目录句柄直接写进扩展的 IndexedDB。
+ *
+ * 注意：**不能**通过 chrome.runtime.sendMessage 把 FileSystemDirectoryHandle
+ * 传给后台 —— 消息通道的结构化克隆会把句柄变成空壳（方法全丢，只剩 name 都读不到），
+ * 后台拿到后调 getFileHandle 会报 "is not a function"。
+ * 唯一可靠的办法是页面自己把它写进 IndexedDB（同一个 chrome-extension:// 源，
+ * 后台能读到），之后后台就能用这个句柄静默写文件。
+ */
+async function saveDirHandleToIDB(handle) {
+  const DB_NAME = 'trace-subs';
+  const db = await new Promise((resolve, reject) => {
+    const req = indexedDB.open(DB_NAME, 2);
+    req.onupgradeneeded = () => {
+      const d = req.result;
+      if (!d.objectStoreNames.contains('translations')) {
+        const s = d.createObjectStore('translations', { keyPath: 'key' });
+        s.createIndex('createdAt', 'createdAt');
+      }
+      if (!d.objectStoreNames.contains('words')) {
+        const w = d.createObjectStore('words', { keyPath: 'word' });
+        w.createIndex('createdAt', 'createdAt');
+      }
+      if (!d.objectStoreNames.contains('meta')) d.createObjectStore('meta', { keyPath: 'key' });
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+  await new Promise((resolve, reject) => {
+    const tx = db.transaction('meta', 'readwrite');
+    tx.objectStore('meta').put({ key: 'backupDir', handle, name: handle.name || '' });
+    tx.oncomplete = () => resolve(true);
+    tx.onerror = () => reject(tx.error);
+  });
+  db.close();
+}
+
+/** 从 IndexedDB 清掉目录句柄 */
+async function clearDirHandleInIDB() {
+  const DB_NAME = 'trace-subs';
+  const db = await new Promise((resolve, reject) => {
+    const req = indexedDB.open(DB_NAME, 2);
+    req.onupgradeneeded = () => {
+      const d = req.result;
+      if (!d.objectStoreNames.contains('meta')) d.createObjectStore('meta', { keyPath: 'key' });
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+  await new Promise((resolve) => {
+    const tx = db.transaction('meta', 'readwrite');
+    tx.objectStore('meta').delete('backupDir');
+    tx.oncomplete = () => resolve(true);
+    tx.onerror = () => resolve(false);
+  });
+  db.close();
+}
+
+/** 刷新侧栏的目录状态（名称 / 权限 / 是否已设） */
+async function refreshDirUI() {
+  const btn = $('pickDirBtn');
+  const label = $('pickDirLabel');
+  const hint = $('bkHint');
+  if (!btn) return;
+  const r = await chrome.runtime.sendMessage({ type: 'backup:get-dir' }).catch(() => null);
+  const d = r && r.ok ? r.data : { has: false };
+  if (d && d.has) {
+    btn.classList.add('set');
+    label.textContent = d.name || '已选文件夹';
+    hint.textContent =
+      d.permission === 'granted' ? '备份会写到这个文件夹' : '权限已失效，点上方重新选择';
+  } else {
+    btn.classList.remove('set');
+    label.textContent = '选择备份文件夹';
+    hint.textContent = '还没选目录，备份会存到「下载」';
+  }
+}
+
+$('pickDirBtn').addEventListener('click', async () => {
+  if (typeof showDirectoryPicker !== 'function') {
+    toast('当前浏览器不支持选择文件夹，备份会存到「下载」', 'err');
+    return;
+  }
+  try {
+    const handle = await showDirectoryPicker({ id: 'trace-backup', mode: 'readwrite' });
+    // 句柄由页面直接写库（不能走消息通道，见 saveDirHandleToIDB 的注释）
+    await saveDirHandleToIDB(handle);
+    // 只把「名字」告诉后台，用于设置里显示
+    await chrome.runtime.sendMessage({ type: 'backup:set-dir', name: handle.name });
+    toast(`备份文件夹已设为「${handle.name}」`);
+    await refreshDirUI();
+    // 立刻写一次，让用户看到效果，也验证权限确实可用
+    const b = await chrome.runtime.sendMessage({ type: 'backup:save' }).catch(() => null);
+    if (b && b.ok) toast(`已备份 ${b.data.count} 个单词到「${handle.name}」`);
+    else if (b && !b.ok) toast('写入失败：' + (b.error || '未知'), 'err');
+  } catch (e) {
+    // 用户取消选择框会抛 AbortError，不算错误
+    if (e && (e.name === 'AbortError' || /abort/i.test(String(e)))) return;
+    toast('选择文件夹失败：' + ((e && e.message) || e), 'err');
+  }
+});
+
+// 自动备份开关
+(async () => {
+  const r = await chrome.runtime.sendMessage({ type: 'settings:get' }).catch(() => null);
+  const st = (r && r.ok && r.data) || {};
+  const cb = $('autoBackup');
+  if (cb) {
+    cb.checked = st.autoBackup !== false;
+    cb.addEventListener('change', async () => {
+      await chrome.runtime.sendMessage({
+        type: 'settings:set',
+        patch: { autoBackup: cb.checked, autoBackupFails: 0 },
+      });
+      toast(cb.checked ? '已开启自动备份' : '已关闭自动备份');
+    });
+  }
+  await refreshDirUI();
+})();
+
+$('restoreBtn').addEventListener('click', async () => {
+  // 优先：直接从「已选文件夹」里读那份备份，省得用户再翻文件
+  const auto = await chrome.runtime.sendMessage({ type: 'backup:read-dir' }).catch(() => null);
+  if (auto && auto.ok && auto.data && Array.isArray(auto.data.words)) {
+    const n = auto.data.words.length;
+    const ok = confirm(
+      `在已选文件夹里找到备份（${n} 个单词，${String(auto.data.exportedAt || '').slice(0, 10)}）。\n\n点「确定」恢复；点「取消」改为手动选文件。`
+    );
+    if (ok) {
+      try {
+        const res = await doRestore(auto.data, false);
+        toast(`已恢复：新增 ${res.added} 个，合并 ${res.merged} 个`);
+        reload();
+      } catch (e) {
+        toast('恢复失败：' + ((e && e.message) || e), 'err');
+      }
+      return;
+    }
+  }
+
+  // 手动选文件
+  const input = document.createElement('input');
+  input.type = 'file';
+  input.accept = 'application/json,.json';
+  input.addEventListener('change', async () => {
+    const file = input.files && input.files[0];
+    if (!file) return;
+    try {
+      const text = await file.text();
+      const data = JSON.parse(text);
+      const n = Array.isArray(data.words) ? data.words.length : 0;
+      const ok = confirm(`即将从「${file.name}」恢复 ${n} 个单词。\n\n点「确定」合并进现有生词本（同名单词保留更早的加入时间与更高的复习次数）；点「取消」放弃。`);
+      if (!ok) return;
+      const res = await doRestore(data, false);
+      toast(`已恢复：新增 ${res.added} 个，合并 ${res.merged} 个`);
+      reload();
+    } catch (e) {
+      toast('恢复失败：' + ((e && e.message) || e), 'err');
+    }
+  });
+  input.click();
+});
+
 // 后台生词本变化时自动刷新（在 YouTube 页加词，看板这边立刻更新）
 chrome.runtime.onMessage.addListener((msg) => {
   if (msg && msg.type === 'words:changed') reload();

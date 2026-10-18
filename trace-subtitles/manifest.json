@@ -9,7 +9,7 @@
     "48": "icons/icon48.png",
     "128": "icons/icon128.png"
   },
-  "permissions": ["storage", "unlimitedStorage"],
+  "permissions": ["storage", "unlimitedStorage", "downloads"],
   "host_permissions": [
     "https://*.youtube.com/*",
     "https://translate.googleapis.com/*",
