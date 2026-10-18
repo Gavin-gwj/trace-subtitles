@@ -225,6 +225,26 @@ const WATCH = `${ORIGIN}/watch?v=${fx.VIDEO_ID}`;
   }
   console.log('after remove:', JSON.stringify(afterRemove));
 
+  // ---- 同一个词重复出现时，译文里绝不能漏出哨兵记号 ----
+  // 这是 bug 12：Google 对重复词去重时会删掉相邻的一个括号，
+  // 早期版本用「成对括号」匹配，坏掉的槽位匹配失败 → `⟦2⟧`、`⟧3⟧` 原样进译文。
+  const repeat = await sw.evaluate(async () => {
+    const D = globalThis.__traceDebug;
+    const text =
+      '>> What you will do Put and the top and prise it open so you got two halves. ' +
+      'Cream on the bottom of both halves, dollop of jam on both halves.';
+    const r = await D.translateAligned([text], [['halves']], 'en', 'zh-CN');
+    const zh = r.texts[0] || '';
+    return {
+      zh,
+      hasSentinel: /[\u27E6\u27E7]/.test(zh),
+      // 译文里出现孤立的 0-9（不是「两半」「30 秒」这类正常数字）就算泄漏
+      hasStrayDigit: /\d/.test(zh),
+      spans: (r.spans[0] || []).map((s) => ({ w: s.word, zh: s.zh })),
+    };
+  });
+  console.log('repeated word:', JSON.stringify(repeat, null, 1));
+
   await ctx.close();
 
   const checks = {
@@ -234,6 +254,7 @@ const WATCH = `${ORIGIN}/watch?v=${fx.VIDEO_ID}`;
     cyan: !!(zh && /127,\s*227,\s*212/.test(zh.color || '')),
     clickOpens: !!(clickOk && clickOk.present && !clickOk.hidden && clickOk.btnAct === 'remove'),
     removed: !!(afterRemove && afterRemove.zhCount < (zh?.count || 99)),
+    repeatOk: !!(repeat && !repeat.hasSentinel && !repeat.hasStrayDigit && repeat.spans.length >= 1),
   };
   const pass = Object.values(checks).every(Boolean);
   console.log('\nchecks:', JSON.stringify(checks));

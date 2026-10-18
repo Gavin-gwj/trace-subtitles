@@ -343,7 +343,33 @@ async function myMemoryAll(texts, source, target, limit = Infinity) {
 
 const SENT_A = '\u27E6';
 const SENT_B = '\u27E7';
-const SENT_RE = new RegExp(`[${SENT_A}${SENT_B}]`, 'g');
+
+// 哨兵在译文里**会被 Google 弄坏**，不能靠「成对括号」匹配。
+// 实测（"…two ⟦0⟧halves⟦1⟧. …both ⟦2⟧halves⟦3⟧, …both ⟦4⟧halves⟦5⟧."）返回：
+//   "…两半⟦0⟧半⟦1⟧。 ⟦2⟧⟧3⟧底部涂上奶油，⟦4⟧⟧5⟧都涂上果酱。"
+// 即重复出现的词被去重时，Google 把「词 + 后一个哨兵的左括号」一起删掉了，
+// 于是 `⟦2⟧halves⟦3⟧` 变成 `⟦2⟧⟧3⟧`（`⟦3⟧` 少了左括号）。
+// 早期版本用 `⟦n⟧([\s\S]*?)⟦n+1⟧` 严格配对，这些坏掉的槽位匹配失败，
+// 于是 `⟦2⟧`、`⟧3⟧` 这些记号**原样漏进译文**，用户看到的就是「〖3〗」之类的乱码。
+// 修复思路：括号可能丢，但括号里的**编号几乎总被保留**，所以以编号为锚点扫描，
+// 相邻两个记号之间的文本就是那个槽位的内容；扫不到内容的槽位就放弃高亮（不猜）。
+const TOKEN_RE = /[\u27E6\u27E7]?\s*(\d+)\s*[\u27E6\u27E7]/g;
+
+/** 扫描译文里所有哨兵记号（容忍括号被删/被替换），按出现顺序返回 {idx, start, end} */
+function scanTokens(raw) {
+  const out = [];
+  TOKEN_RE.lastIndex = 0;
+  let m;
+  while ((m = TOKEN_RE.exec(raw))) {
+    out.push({ idx: Number(m[1]), start: m.index, end: m.index + m[0].length });
+  }
+  return out;
+}
+
+/** 去掉残留的哨兵括号字符（数字由记号扫描负责消费，不会走到这里） */
+function stripMarkers(raw) {
+  return raw.replace(/[\u27E6\u27E7]/g, '');
+}
 
 /** 把 text 里出现在 wordSet 中的单词包上哨兵，返回 {marked, slots} */
 function markWords(text, wordSet) {
@@ -380,20 +406,70 @@ function markWords(text, wordSet) {
   return { marked: out, slots };
 }
 
-/** 从带哨兵的译文里抽出每个 slot 的中文，并给出清洗后的纯译文 */
+/**
+ * 从带哨兵的译文里抽出每个 slot 的中文，并给出清洗后的纯译文。
+ *
+ * 不依赖「成对括号」（Google 会删掉重复词旁的一个括号，见 TOKEN_RE 上方注释）：
+ *   ① 扫描所有记号；
+ *   ② 相邻两个记号之间的文本 = 前一个槽位的译文；
+ *   ③ 内容为空或夹着别的括号 → 该槽位被引擎吃掉，放弃高亮（绝不猜）；
+ *   ④ 清洗时把**记号整体**（含编号）和落单括号一起删掉，
+ *      否则 `⟦2⟧⟧3⟧` 里的数字会变成译文里的 "23"。
+ */
 function parseMarked(out, slots) {
-  const spans = [];
-  for (const s of slots) {
-    const idx = spans.length * 2;
-    const re = new RegExp(`${SENT_A}${idx}${SENT_B}([\\s\\S]*?)${SENT_A}${idx + 1}${SENT_B}`);
-    const m = out.match(re);
-    if (m && m[1] && m[1].trim()) {
-      spans.push({ word: s.word, zh: m[1].trim(), start: m.index, end: m.index + m[0].length });
-    } else {
-      spans.push({ word: s.word, zh: null, start: -1, end: -1 });
-    }
+  const tokens = scanTokens(out);
+  const spans = slots.map((s) => ({ word: s.word, zh: null, start: -1, end: -1 }));
+
+  // ---- 收集要删除的区间：记号本身 + 任何落单的括号字符 ----
+  const cuts = tokens.map((t) => ({ at: t.start, end: t.end }));
+  for (let i = 0; i < out.length; i++) {
+    const ch = out[i];
+    if (ch === SENT_A || ch === SENT_B) cuts.push({ at: i, end: i + 1 });
   }
-  const clean = out.replace(new RegExp(`${SENT_A}\\d+${SENT_B}`, 'g'), '');
+  cuts.sort((a, b) => a.at - b.at);
+  const merged = [];
+  for (const c of cuts) {
+    const last = merged[merged.length - 1];
+    if (last && c.at <= last.end) last.end = Math.max(last.end, c.end);
+    else merged.push({ at: c.at, end: c.end });
+  }
+  // raw 坐标 → 清洗后坐标
+  const adjust = (pos) => {
+    let d = 0;
+    for (const c of merged) {
+      if (c.at >= pos) break;
+      d += Math.min(c.end, pos) - c.at;
+    }
+    return pos - d;
+  };
+  let clean = '';
+  let cursor = 0;
+  for (const c of merged) {
+    clean += out.slice(cursor, c.at);
+    cursor = c.end;
+  }
+  clean += out.slice(cursor);
+
+  // ---- 槽位内容：只接受「左记号 + 紧邻的右记号」这一对 ----
+  for (let t = 0; t < tokens.length - 1; t++) {
+    const open = tokens[t];
+    const close = tokens[t + 1];
+    if (open.idx % 2 !== 0) continue; // 只从槽位的左记号起算（idx = slot*2）
+    if (close.idx !== open.idx + 1) continue; // 右记号必须紧邻，否则结构已坏
+    const slot = open.idx >> 1;
+    if (slot < 0 || slot >= slots.length) continue;
+    const body = out.slice(open.end, close.start);
+    if (!body.trim()) continue; // 词被引擎去重掉了（`⟦2⟧⟧3⟧`）
+    if (/[\u27E6\u27E7]/.test(body)) continue; // 内容里还有括号 → 错位，放弃
+    if (/^\s*\d+\s*$/.test(body)) continue; // 只剩编号，说明词没翻出来
+    spans[slot] = {
+      word: slots[slot].word,
+      zh: body.trim(),
+      start: adjust(open.end),
+      end: adjust(close.start),
+    };
+  }
+
   return { clean, spans };
 }
 
@@ -413,9 +489,9 @@ function parseMarked(out, slots) {
 
   for (let i = 0; i < texts.length; i++) {
     const mk = markWords(texts[i], wordSets?.[i]);
-    // 缓存键版本号 al2：早期版本会把「标记失败退回纯译文」的结果也写进来，
+    // 缓存键版本号 al3：早期版本会把「标记失败退回纯译文」的结果也写进来，
     // 那些记录的 spans 为空、译文里还夹着英文原词，换版本号即可整体绕过旧脏数据。
-    const key = `${tl}|al2|${hashStr(texts[i])}|${hashStr(((Array.isArray(wordSets?.[i]) ? wordSets[i] : wordSets?.[i] ? [...wordSets[i]] : []).map((w) => String(w).toLowerCase()).sort().join(',')))}`;
+    const key = `${tl}|al3|${hashStr(texts[i])}|${hashStr(((Array.isArray(wordSets?.[i]) ? wordSets[i] : wordSets?.[i] ? [...wordSets[i]] : []).map((w) => String(w).toLowerCase()).sort().join(',')))}`;
     const hit = await idbGet('translations', key);
     if (hit && typeof hit.text === 'string' && hit.text.trim() && Array.isArray(hit.spans)) {
       result.texts[i] = hit.text;
@@ -468,35 +544,18 @@ function parseMarked(out, slots) {
   }
 
   // ---- 3. 解析哨兵，得到纯译文 + 中文词位置 ----
-  const reMark = new RegExp(`${SENT_A}\\d+${SENT_B}`, 'g');
   for (let k = 0; k < missIdx.length; k++) {
     const i = missIdx[k];
     const raw = outs[k] || '';
     const mk = missMarked[k];
 
     if (!mk.slots.length) {
-      const clean = raw.replace(reMark, '');
-      result.texts[i] = clean;
+      result.texts[i] = stripMarkers(raw);
       result.spans[i] = [];
     } else {
       const { clean, spans } = parseMarked(raw, mk.slots);
-      // 把绝对位置换算成「清洗后文本」里的位置
-      const shifts = [];
-      reMark.lastIndex = 0;
-      let mm;
-      while ((mm = reMark.exec(raw))) shifts.push({ at: mm.index, len: mm[0].length });
-      const adjust = (pos) => {
-        let d = 0;
-        for (const s of shifts) {
-          if (s.at < pos) d += s.len;
-          else break;
-        }
-        return pos - d;
-      };
       result.texts[i] = clean;
-      result.spans[i] = spans
-        .filter((s) => s.zh && s.start >= 0)
-        .map((s) => ({ word: s.word, zh: s.zh, start: adjust(s.start), end: adjust(s.end) }));
+      result.spans[i] = spans.filter((s) => s.zh && s.start >= 0);
     }
 
     // ---- 4. 兜底：哨兵之间没有译出中文（Google 偶尔把标记内的词原样保留）----
@@ -508,7 +567,7 @@ function parseMarked(out, slots) {
 
     if (result.texts[i]) {
       await idbPut('translations', {
-        key: `${tl}|al2|${hashStr(texts[i])}|${hashStr(
+        key: `${tl}|al3|${hashStr(texts[i])}|${hashStr(
           (Array.isArray(wordSets?.[i]) ? wordSets[i] : wordSets?.[i] ? [...wordSets[i]] : []).map((w) => String(w).toLowerCase()).sort().join(',')
         )}`,
         source: texts[i],
