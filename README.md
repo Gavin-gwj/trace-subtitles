@@ -353,7 +353,7 @@ store），同一个视频二次打开不再请求网络。
 - **退化路径**：若引擎把哨兵全吃掉（例如 MyMemory），`usable` 判定失败 → 退回纯译文，
   中文不高亮但至少能读，不会显示乱码。
 
-### 过程中修掉的十七个真实 bug（值得记录）
+### 过程中修掉的十八个真实 bug（值得记录）
 
 **bug 1：跨消息传函数。** `content.js` 曾把 `hash: S.hash` 放进 `chrome.runtime.sendMessage`，
 而消息经过结构化克隆会丢掉函数，SW 侧抛 `TypeError: hashFn is not a function`。
@@ -938,6 +938,65 @@ YouTube 自己隐藏的控制栏 / 不重叠时不能触发）与 7 项断言见
 这个修复本身又引出一个 bug：把 `!boxRect` 兜底分支从函数末尾提到判断链最前面时，
 忘了删掉末尾那行重复的兜底赋值 —— 于是 `boxRect` 为 null 时仍然执行 `boxRect.top`，
 `TypeError` 让整个卡片不渲染，`L7`–`L10c` 全部 FAIL。**移动分支要连带删掉旧位置那份。**
+
+**bug 16：加入生词本后，中文译文里会冒出英文单词。**
+
+现象（用户截图）：英文字幕 `…I want to create a horizontal video.`，中文却成了
+`…我想创建一个 horizo​​ntal 视频。` —— 中间那个词是英文，而且**看起来完全正常**，
+复制出来才发现里面藏着两个不可见的字符。
+
+根因是 Google 的返回里插了**零宽空格**（`U+200B`）：
+
+```
+horizontal  →  horizo\u200B\u200Bntal
+```
+
+逐字符打出来才看得见（`U+0068 h / U+006F o / … / U+200B  <-- INVISIBLE / …`）。这直接废掉两条链路：
+
+```js
+/horizontal/.test('horizo\u200B\u200Bntal')  // false —— 检测不到「译文里还有英文原词」
+text.indexOf('horizontal')                   // -1   —— 补译时就地替换也找不到位置
+```
+
+于是 `looksUntranslated()` 判定「已翻译」→ 补译逻辑从不触发 → 英文就那么留在中文里。
+
+修复是三层：
+
+```js
+const INVISIBLE_RE = /[\u200B-\u200F\u2060\uFEFF\u00AD]/g;
+function stripInvisible(s) {
+  return String(s == null ? '' : s).replace(INVISIBLE_RE, '');
+}
+/** 生成一个能容忍「字母之间夹零宽字符」的词匹配正则 */
+function looseWordRe(word, flags = 'gi') {
+  const chars = String(word).split('').map((c) => escapeRe(c));
+  return new RegExp(chars.join('[\\u200B-\\u200F\\u2060\\uFEFF\\u00AD]*'), flags);
+}
+```
+
+1. **`googleOnce()` 出口统一清洗** —— 所有引擎结果都从这道门过。
+2. **`parseMarked()` 入口先清洗再算位置** —— 否则「记号位置」和「最终文本位置」会差若干个看不见的字符，高亮框整体错位。
+3. **`looksUntranslated()` 与替换用的正则改用 `looseWordRe()`** —— 检测与替换都要能跨零宽字符命中。
+
+还补了第四层：`cjkSpansOnly()` 在补译**之后**做最终把关，只保留 `zh` 里真含中文的 span。
+补译也可能失败（网络抖动），这时留一个「内容是英文的高亮」比不高亮更让人困惑。
+
+**这一步不能挪进 `parseMarked()`** —— 它必须保留坏槽位，否则 `repairUntranslatedSlots()`
+就找不到该补译的词了。第一版把过滤写进 `parseMarked()`，`test-invisible.js` 的 `S5b` 立刻 FAIL。
+
+这个 bug 能活这么久，是因为**所有既有测试都只断言「译文非空 / 有中文」**，
+没人断言「译文里不能有英文残留」。新增 `test-invisible.js`（10 项），
+并做了旧代码反向验证：
+
+| 断言 | 旧代码 | 新代码 |
+|---|---|---|
+| S2 端到端译文不含零宽字符 | **FAIL**（`horizo​​ntal`，`hasZw: true`） | PASS |
+| S5 `parseMarked` 输出不含零宽字符 | **FAIL**（`zh: "horizo​​ntal"`） | PASS |
+| S5b 补译之后的把关只留中文高亮 | **FAIL**（`cjkSpansOnly` 不存在） | PASS |
+
+注意 `S2b`（译文里没有残留的英文原词）**在旧代码上也是 PASS** ——
+因为 `/horizontal/` 本来也匹配不到 `horizo\u200B\u200Bntal`。这条断言没有判别力，
+真正的判别力在 `S2`（检查有没有零宽字符本身）。
 
 ### 词形归一化：收藏 beverage，也要高亮 beverages
 
@@ -1728,6 +1787,7 @@ node test-global.js          # 全局显示悬浮条 + 离开画面自动隐藏 
 node test-dodge.js           # 字幕压住 YouTube 设置菜单时让路（淡出 + 点击穿透）
 node test-dict.js            # 查词卡片中文优先（词性中文 + 释义中文化 + 语境义）
 node test-phrase.js          # 短语整段释义 + 短语生词本 + 大模型引擎与降级
+node test-invisible.js       # 译文里不残留英文（Google 会插零宽空格破坏匹配）
 node run-all.js              # 一次跑完以上全部，末尾输出 PASS/FAIL 汇总
 ```
 
@@ -1864,6 +1924,7 @@ D:\MyFiles\项目\Trace\
    ├─ test-dodge.js             字幕压住设置菜单时让路（淡出 + 点击穿透）
 ├─ test-dict.js              查词卡片中文优先（词性中文 + 释义中文化 + 语境义）
 ├─ test-phrase.js            短语整段释义 + 短语生词本 + 大模型引擎与降级
+├─ test-invisible.js         译文里不残留英文（零宽空格破坏匹配）
 ├─ run-all.js                一次跑完全部回归，输出汇总表
 ├─ shot-dict.png             查词卡片：本句译作「立即」与单词直译「立即地」并存
 ├─ shot-phrase.png           短语卡：警示条 + 降级释义 + 逐词对照

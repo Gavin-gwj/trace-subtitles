@@ -20,6 +20,7 @@ const SUITES = [
   'test-dodge.js',
   'test-dict.js',
   'test-phrase.js',
+  'test-invisible.js',
 ];
 
 const results = [];

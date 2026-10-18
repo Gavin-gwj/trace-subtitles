@@ -222,9 +222,11 @@ async function googleOnce(texts, sl, tl, host, client) {
   const out = [];
   for (let i = 0; i < texts.length; i++) {
     const item = arr[i];
+    // 统一在这里清零宽字符：Google 会在英文词中间插 U+200B，
+    // 留着会让「译文里是否还有英文」的检测与补译全部失效。
     if (item == null) out.push('');
-    else if (typeof item === 'string') out.push(item);
-    else if (Array.isArray(item)) out.push(String(item[0] ?? ''));
+    else if (typeof item === 'string') out.push(stripInvisible(item));
+    else if (Array.isArray(item)) out.push(stripInvisible(String(item[0] ?? '')));
     else out.push('');
   }
   return out;
@@ -642,9 +644,9 @@ function scanTokens(raw) {
   return out;
 }
 
-/** 去掉残留的哨兵括号字符（数字由记号扫描负责消费，不会走到这里） */
+/** 去掉残留的哨兵括号字符与零宽字符（数字由记号扫描负责消费，不会走到这里） */
 function stripMarkers(raw) {
-  return raw.replace(/[\u27E6\u27E7]/g, '');
+  return stripInvisible(String(raw == null ? '' : raw)).replace(/[\u27E6\u27E7]/g, '');
 }
 
 // >>> WORD_FORMS_BEGIN  (本段在 subtitles.js 与 bg.js 里各有一份，内容必须一致，tools/test-forms.js 会逐行比对)
@@ -819,7 +821,28 @@ function markWords(text, wordSet) {
 }
 
 /**
- * 从带哨兵的译文里抽出每个 slot 的中文，并给出清洗后的纯译文。
+ * 零宽/不可见字符。
+ *
+ * Google 会在英文单词**中间**插零宽空格（U+200B）—— 实测
+ *   horizontal → horizo\u200B\u200Bntal
+ * 肉眼完全看不出来，但所有正则都匹配不到它：
+ *   /horizontal/.test('horizo\u200B\u200Bntal') === false
+ * 后果是「译文里残留英文原词」的检测与补译全部失效，英文就那么留在中文里。
+ * 所以：清洗译文时一律删掉，做词匹配时一律允许它们夹在字母之间。
+ */
+const INVISIBLE_RE = /[\u200B-\u200F\u2060\uFEFF\u00AD]/g;
+
+function stripInvisible(s) {
+  return String(s == null ? '' : s).replace(INVISIBLE_RE, '');
+}
+
+/** 生成一个能容忍「字母之间夹零宽字符」的词匹配正则 */
+function looseWordRe(word, flags = 'gi') {
+  const chars = String(word).split('').map((c) => escapeRe(c));
+  return new RegExp(chars.join('[\\u200B-\\u200F\\u2060\\uFEFF\\u00AD]*'), flags);
+}
+
+/** 从带哨兵的译文里抽出每个 slot 的中文，并给出清洗后的纯译文。
  *
  * 不依赖「成对括号」（Google 会删掉重复词旁的一个括号，见 TOKEN_RE 上方注释）：
  *   ① 扫描所有记号；
@@ -829,6 +852,9 @@ function markWords(text, wordSet) {
  *      否则 `⟦2⟧⟧3⟧` 里的数字会变成译文里的 "23"。
  */
 function parseMarked(out, slots) {
+  // 先清掉零宽字符再做任何位置计算 —— 统一坐标系，
+  // 否则「记号位置」和「最终文本位置」会差若干个看不见的字符。
+  out = stripInvisible(out);
   const tokens = scanTokens(out);
   const spans = slots.map((s) => ({ word: s.word, zh: null, start: -1, end: -1 }));
 
@@ -987,6 +1013,15 @@ function parseMarked(out, slots) {
       await repairUntranslatedSlots(result, i, texts[i], mk, tl);
     }
 
+    // ---- 5. 最终把关：只留下真的是中文的高亮 ----
+    // 补译也可能失败（网络抖动 / 引擎就是不给译文）。这时 spans 里会留着
+    // 「zh 是英文原词」的槽位，渲染出来就是中文字幕里夹一块高亮的英文 ——
+    // 正是用户报的那个症状。宁可不高亮，也不显示一个假的高亮。
+    //
+    // 注意这一步**不能**挪进 parseMarked：parseMarked 必须保留坏槽位，
+    // 否则 repairUntranslatedSlots 就找不到该补译的词了。
+    result.spans[i] = cjkSpansOnly(result.spans[i]);
+
     if (result.texts[i]) {
       await idbPut('translations', {
         key: keyOf(i),
@@ -999,6 +1034,19 @@ function parseMarked(out, slots) {
     }
   }
   return result;
+}
+
+/**
+ * 只保留「真的是中文」的高亮片段。
+ *
+ * 一个槽位如果没翻出来（zh 为空、或 zh 就是英文原词），它不能作为高亮显示 ——
+ * 否则中文字幕里会夹一块高亮的英文，比不高亮更让人困惑。
+ */
+function cjkSpansOnly(spans) {
+  if (!Array.isArray(spans)) return [];
+  return spans.filter(
+    (s) => s && typeof s.zh === 'string' && /[\u4e00-\u9fff]/.test(s.zh) && s.start >= 0
+  );
 }
 
 /**
@@ -1019,8 +1067,10 @@ async function repairUntranslatedSlots(result, i, sourceText, mk, tl) {
     if (!s || !s.zh) return true;
     const hasCjk = /[\u4e00-\u9fff]/.test(s.zh);
     if (!hasCjk) return true;
-    // 译文里仍含英文原词（例如 "wordbook" 混在中文里）也算没翻干净
-    return new RegExp(`(^|[^A-Za-z])${escapeRe(s.word)}([^A-Za-z]|$)`, 'i').test(s.zh);
+    // 译文里仍含英文原词（例如 "wordbook" 混在中文里）也算没翻干净。
+    // 用 looseWordRe 而不是普通正则：Google 会在字母间插零宽字符，
+    // 普通 /horizontal/ 匹配不到 horizo\u200B\u200Bntal，会漏判成「已翻译」。
+    return looseWordRe(s.word).test(s.zh);
   };
 
   const broken = spans.filter((s) => s.start >= 0 && looksUntranslated(s));
@@ -1051,8 +1101,8 @@ async function repairUntranslatedSlots(result, i, sourceText, mk, tl) {
       if (s.start >= 0) newSpans.push(s);
       continue;
     }
-    // 在当前位置附近找英文原词（大小写不敏感）
-    const re = new RegExp(escapeRe(s.word), 'gi');
+    // 在当前位置附近找英文原词（大小写不敏感，容忍零宽字符）
+    const re = looseWordRe(s.word);
     re.lastIndex = 0;
     const m = re.exec(text);
     if (!m) {
@@ -1134,7 +1184,9 @@ async function translateWithCache(texts, source, target) {
     }
     for (let j = 0; j < chunk.length; j++) {
       const gi = missIdx[i + j];
-      const txt = outs[j] || '';
+      // 同一道清零宽字符的关：googleOnce 已经清过，但大模型/MyMemory
+      // 也可能吐出不可见字符，统一在这里收口。
+      const txt = stripInvisible(outs[j] || '');
       result[gi] = txt;
       if (txt) {
         await idbPut('translations', {
@@ -2040,6 +2092,11 @@ globalThis.__traceDebug = {
   translateAligned,
   markWords,
   parseMarked,
+  /** 零宽字符处理：Google 会在英文词中间插 U+200B，导致所有正则匹配不到 */
+  stripInvisible,
+  looseWordRe,
+  /** 补译之后的把关：只保留真的是中文的高亮片段 */
+  cjkSpansOnly,
   /** 词形归一化：字幕里的词形能命中生词本里的哪个词（含单复数等变化） */
   wordForms,
   matchSaved,
