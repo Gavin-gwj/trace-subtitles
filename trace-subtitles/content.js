@@ -504,16 +504,28 @@
   }
 
   /**
-   * 按当前保存的位置重新摆一次字幕框（拖动、换句、视频框变化后调用）。
-   * 只处理纵向：水平方向永远由 CSS 居中（left:50% + translateX(-50%)），
-   * 这样句子长短变化时字幕不会左右跳，也不需要再夹紧横向边界。
+   * 按当前视频框重新摆一次字幕框（换句、视频框变化后调用）。
+   *
+   * 纵向位置必须用保存的归一化比例 ny 乘「当前」画面高度重新算，
+   * **不能沿用上一次写下的像素 top**。否则小窗里拖到 75% 的位置（506px 高的
+   * 画面里约 380px），进全屏后画面变 900px、380px 只剩 42%，字幕会突然
+   * 上浮到画面中间 —— 这正是「全屏后位置不对」的成因。
+   * 只处理纵向：水平方向永远由 CSS 居中（left:50% + translateX(-50%)）。
    */
   function reapplyFreePos() {
     if (!boxEl) return;
     const g = overlayGeom();
-    const cy = parseFloat(boxEl.style.top);
+    const pos = state.settings?.freePos;
     const h = boxEl.offsetHeight || 0;
-    const y = Number.isFinite(cy) ? cy : g.height * 0.8;
+    const pixelTop = parseFloat(boxEl.style.top);
+    let y;
+    if (pos && Number.isFinite(pos.ny)) {
+      y = pos.ny * g.height;          // 按新画面高度换算，相对位置保持不变
+    } else if (Number.isFinite(pixelTop)) {
+      y = pixelTop;                    // 没有比例可依（旧数据）才退回像素
+    } else {
+      y = g.height * 0.8;
+    }
     boxEl.style.top = Math.round(Math.max(4, Math.min(y, Math.max(4, g.height - h - 4)))) + 'px';
   }
 

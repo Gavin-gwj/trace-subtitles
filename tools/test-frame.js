@@ -108,6 +108,52 @@ const FRAME = { left: 140, top: 80, width: 900, height: 506 };
   const vscaleBack = parseFloat(back.vscale);
   const fontBack = Math.abs(back.fontPx - baseFont) <= 1;
 
+  // ---------- 4) 拖动后的纵向相对位置，进出全屏必须保持一致 ----------
+  // 曾经的 bug：reapplyFreePos() 沿用上一次写下的像素 top 再夹紧，
+  // 小窗 506px 高时拖到 78%（约 395px），全屏 900px 高时 395px 只剩 44%，
+  // 字幕突然上浮到画面中间。这里直接量「框中心 / 画面高度」这个比例。
+  const boxCenterRatio = () => page.evaluate(() => {
+    const box = document.querySelector('.trace-sub-box');
+    const ov = document.querySelector('#trace-sub-overlay');
+    const b = box.getBoundingClientRect();
+    const o = ov.getBoundingClientRect();
+    return Math.round(((b.top + b.height / 2 - o.top) / o.height) * 1000) / 1000;
+  });
+
+  // 先悬停到字幕框上让拖动手柄显形，再按住手柄往上拖一段
+  const boxRect = await page.evaluate(() => {
+    const b = document.querySelector('.trace-sub-box').getBoundingClientRect();
+    return { x: b.x, y: b.y, w: b.width, h: b.height };
+  });
+  await page.mouse.move(boxRect.x + boxRect.w / 2, boxRect.y + boxRect.h / 2);
+  await page.waitForTimeout(450);
+  const handleRect = await page.evaluate(() => {
+    const h = document.querySelector('.trace-drag-handle');
+    const b = h.getBoundingClientRect();
+    return { x: b.x + b.width / 2, y: b.y + b.height / 2 };
+  });
+  await page.mouse.move(handleRect.x, handleRect.y);
+  await page.waitForTimeout(120);
+  await page.mouse.down();
+  // 往上拖 120px：让字幕明显离开默认的 82% 位置
+  await page.mouse.move(handleRect.x, handleRect.y - 120, { steps: 12 });
+  await page.mouse.up();
+  await page.waitForTimeout(500);
+  const ratioNormal = await boxCenterRatio();
+
+  await page.evaluate(() => window.__mockFullscreen(true));
+  await page.waitForTimeout(600);
+  const ratioFs = await boxCenterRatio();
+  await page.screenshot({ path: 'shot-frame-fullscreen-dragged.png' });
+
+  await page.evaluate(() => window.__mockFullscreen(false));
+  await page.waitForTimeout(600);
+  const ratioBack = await boxCenterRatio();
+
+  // 允许 3% 的偏差：框高不同、像素取整都会带来一点误差
+  const posKeepFs = Math.abs(ratioFs - ratioNormal) <= 0.03;
+  const posKeepBack = Math.abs(ratioBack - ratioNormal) <= 0.03;
+
   console.log(JSON.stringify({
     frame: FRAME,
     normal: { overlay: normal.overlay, player: normal.player, box: normal.box, vscale: vscaleNormal, fontPx: baseFont, text: normal.text },
@@ -121,10 +167,12 @@ const FRAME = { left: 140, top: 80, width: 900, height: 506 };
     back: { overlay: back.overlay, vscale: vscaleBack, fontPx: back.fontPx },
     backOk,
     fontBack,
+    dragKeep: { ratioNormal, ratioFs, ratioBack, posKeepFs, posKeepBack },
   }, null, 2));
 
-  const ok = normalOk && boxInsideFrame && fsOk && scaleOk && fontGrew && fsBoxInside && backOk && fontBack;
-  console.log(`RESULT: ${ok ? 'PASS' : 'FAIL'}（字幕贴视频框 + 全屏等比放大 + 退全屏等比缩回）`);
+  const ok = normalOk && boxInsideFrame && fsOk && scaleOk && fontGrew && fsBoxInside
+    && backOk && fontBack && posKeepFs && posKeepBack;
+  console.log(`RESULT: ${ok ? 'PASS' : 'FAIL'}（字幕贴视频框 + 全屏等比放大 + 退全屏等比缩回 + 拖动位置进出全屏不跑偏）`);
   await ctx.close();
 })().catch((e) => {
   console.error('FATAL', e);
