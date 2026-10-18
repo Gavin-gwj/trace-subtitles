@@ -353,7 +353,7 @@ store），同一个视频二次打开不再请求网络。
 - **退化路径**：若引擎把哨兵全吃掉（例如 MyMemory），`usable` 判定失败 → 退回纯译文，
   中文不高亮但至少能读，不会显示乱码。
 
-### 过程中修掉的十四个真实 bug（值得记录）
+### 过程中修掉的十五个真实 bug（值得记录）
 
 **bug 1：跨消息传函数。** `content.js` 曾把 `hash: S.hash` 放进 `chrome.runtime.sendMessage`，
 而消息经过结构化克隆会丢掉函数，SW 侧抛 `TypeError: hashFn is not a function`。
@@ -873,6 +873,45 @@ B 用例能测出问题，靠的是**给两个引擎不同的可辨识输出**�
 修复后长句与短句的框高**都是 103px** —— 框高不再随句长变化，这才是目标。
 只把 `maxLen` 调小不够：不切分的话 130 字符的句子照样能撑满两行。
 
+**E. 在首页浏览时，字幕还飘在页面内容上。**
+
+现象来自用户反馈：「为什么我在后台放视频，YouTube 首页也会有时候有翻译字幕」。
+根因不是"没隐藏"，而是**覆盖层的坐标系选错了**：它贴的是 `#movie_player` 的矩形，
+而当 YouTube 把播放器缩成右下角 400×225 的迷你窗时，那个矩形**仍然存在且完整可见** ——
+于是字幕照样贴上去，字号还被 `--trace-vscale` 按小窗宽度算成十几个像素。
+
+关键在于「可见」有三种含义，只看矩形有没有值是分不出来的：
+
+| 情况 | 播放器矩形 | 该不该显示 |
+|---|---|---|
+| 翻到评论区，播放器露出一半 | 存在，部分在视口外 | 显示 |
+| 滚到完全看不见 | 存在，完全在视口外 | 隐藏 |
+| 首页后台播放，缩成迷你窗 | 存在且完整可见，但只有视口一小块 | 隐藏 |
+
+所以判据改成「**可见面积 / 播放器面积**」+ 迷你窗识别：
+
+```js
+function frameVisibility() {
+  const r = playerRect();
+  if (!r) return { visible: false, ratio: 0, rect: null, mini: false };
+  const vw = window.innerWidth, vh = window.innerHeight;
+  const mini = r.width < vw * 0.5 && r.height < vh * 0.5;   // 完整可见但没法读
+  const visW = Math.min(r.left + r.width, vw) - Math.max(r.left, 0);
+  const visH = Math.min(r.top + r.height, vh) - Math.max(r.top, 0);
+  if (visW <= 0 || visH <= 0) return { visible: false, ratio: 0, rect: r, mini };
+  const ratio = (visW * visH) / (r.width * r.height);
+  // 45%：翻评论区时常常还露出一半，这时仍算在画面里，
+  // 不该突然切走 —— 那会让字幕在屏幕上跳来跳去。
+  const visible = !mini && ratio >= 0.45 && visW > 80 && visH > 60;
+  return { visible, ratio, rect: r, mini };
+}
+```
+
+配套给了一个 `globalMode` 开关（默认关）：打开后视频框不在视野里时不隐藏，
+而是改成**贴屏幕底部的悬浮条**。完整实现、三个踩坑（悬浮条横穿迷你播放器 /
+内联 `top` 压过 CSS `bottom` / 固定 profile 把上轮设置带进测试）与 8 项断言见
+[全局显示：视频不在眼前时，字幕该去哪儿](#全局显示视频不在眼前时字幕该去哪儿)。
+
 ### 词形归一化：收藏 beverage，也要高亮 beverages
 
 生词本里存的是**某个词形**，但视频里出现的可能是另一个。收藏 `beverage` 之后，
@@ -1089,6 +1128,118 @@ RESULT: PASS（生词本写成本机文件 + 卸载重装后可恢复 + 合并�
 
 ---
 
+### 全局显示：视频不在眼前时，字幕该去哪儿
+
+用户的原始反馈：「为什么我在后台放视频，YouTube 首页也会有时候有翻译字幕」。这不是偶发 bug，
+而是**覆盖层的坐标系**出了问题：它贴的是 `#movie_player` 的矩形，而当 YouTube 把播放器缩成
+右下角 400×225 的迷你窗（首页后台播放）时，那个矩形仍然「存在且完整可见」，于是字幕照样贴上去，
+只是字号被 `--trace-vscale` 按小窗宽度算成十几个像素，飘在首页内容上。
+
+这里有两个独立的问题，分开解决：
+
+**问题一：视频框不在眼前，就不该有字幕。** 判断不能只看 `getBoundingClientRect()` 有没有值 ——
+必须区分三种"不在眼前"：
+
+| 情况 | 播放器矩形 | 该不该显示 |
+|---|---|---|
+| 往下翻到评论区，播放器滚出上半屏 | 存在，但大部分在视口外 | 显示（还在看视频） |
+| 滚到完全看不见 | 存在，完全在视口外 | **隐藏** |
+| 首页后台播放，缩成右下角迷你窗 | 存在且完整可见，但只有视口一小块 | **隐藏** |
+
+所以判据是「**可见面积 / 播放器面积**」而不是「有没有矩形」：
+
+```js
+function frameVisibility() {
+  const r = playerRect();
+  if (!r) return { visible: false, ratio: 0, rect: null, mini: false };
+  const vw = window.innerWidth;
+  const vh = window.innerHeight;
+  // 迷你播放器：宽高都不到视口一半 —— 完整可见但没法读
+  const mini = r.width < vw * 0.5 && r.height < vh * 0.5;
+  const visW = Math.min(r.left + r.width, vw) - Math.max(r.left, 0);
+  const visH = Math.min(r.top + r.height, vh) - Math.max(r.top, 0);
+  if (visW <= 0 || visH <= 0) return { visible: false, ratio: 0, rect: r, mini };
+  const ratio = (visW * visH) / (r.width * r.height);
+  // 45% 这个阈值是刻意的：翻评论区时播放器常常还露出一半，这时仍算在画面里，
+  // 不该突然切成悬浮条 —— 那会让字幕在屏幕上跳来跳去。
+  const visible = !mini && ratio >= 0.45 && visW > 80 && visH > 60;
+  return { visible, ratio, rect: r, mini };
+}
+```
+
+**问题二（可选开关）：有些人就是想在浏览首页时继续看字幕。** 于是加了一个
+`globalMode` 开关（默认关）。打开后，视频框不在视野里时字幕不隐藏，而是变成一个
+**贴屏幕底部的悬浮条**：
+
+```css
+#trace-sub-overlay.trace-global .trace-sub-box {
+  position: fixed;              /* 覆盖层此刻贴的是整个视口，fixed 与 absolute 视觉等价，
+                                   但免掉父级坐标系换算 */
+  left: calc((100% - var(--trace-bar-reserve, 0px)) / 2);
+  bottom: 6vh;
+  max-width: min(86vw, 1100px, calc(100% - var(--trace-bar-reserve, 0px) - 32px));
+  background: rgba(20, 20, 23, .82);   /* 比贴视频时更实：它是页面上的部件，不是画面的一部分 */
+  backdrop-filter: blur(22px) saturate(150%);
+}
+#trace-sub-overlay.trace-global .trace-drag-handle { display: none; }
+```
+
+#### 三个踩过的坑
+
+1. **悬浮条会横穿右下角的迷你播放器。** 第一版直接 `left: 50%; max-width: 86vw`，
+   而迷你窗就在右下角、正好落在悬浮条右半段上 —— 截图里能清楚看到字幕条盖住小窗。
+   修法是让 JS 实测播放器占掉多少右侧宽度，写进 `--trace-bar-reserve`：
+   ```js
+   let barReserve = 0;
+   if (bar && vis.mini && vis.rect) {
+     const r = vis.rect;
+     const inBottom = r.top + r.height / 2 > window.innerHeight * 0.5;
+     const onRight  = r.left + r.width / 2 > window.innerWidth * 0.5;
+     if (inBottom && onRight) {
+       barReserve = Math.min(Math.round(window.innerWidth - r.left + 16),
+                             Math.round(window.innerWidth * 0.5));
+     }
+   }
+   ```
+   实测：悬浮条右缘 950px，迷你窗左缘 1024px，中间 74px 空隙。
+
+2. **悬浮条模式下必须清掉内联 `top`。** 自由拖动过的话 `boxEl.style.top` 上留着上次在画面里的
+   像素值（比如 395px），切到悬浮条后 CSS 的 `bottom: 6vh` 会被内联 `top` 压过，字幕就飘到屏幕中间。
+   ```js
+   if (state.settings?.freePos && boxEl) {
+     if (bar) boxEl.style.top = '';   // 交回 CSS
+     else reapplyFreePos();
+   }
+   ```
+
+3. **测试的固定 profile 会把上一轮的设置带过来。** `launchPersistentContext('.chrome-global')`
+   第二轮跑时 `globalMode` 还是上一轮设的 `true`，于是「开关关闭时应当隐藏」这条一上来测的
+   是打开状态，直接 FAIL。测试开头必须显式复位：
+   ```js
+   await setGlobal(false);   // 先把开关关掉，再开始断言
+   ```
+
+#### 回归测试（`tools/test-global.js`，8 项）
+
+夹具新增三个钩子来模拟真实场景：`__mockScrollAway()`（播放器挪到视口下方）、
+`__mockMini()`（缩成右下角 400×225）、`__mockFrame(null)`（恢复原矩形）。
+
+```
+checks: {
+  awayHiddenWhenOff: true,      // 开关关 + 滚出视野 → opacity 0 / visibility hidden
+  miniHiddenWhenOff: true,      // 开关关 + 迷你播放器 → 同样隐藏（用户报的那个 bug）
+  miniFloatingBar:   true,      // 开关开 + 迷你播放器 → fixed 悬浮条贴底部
+  barClearOfMiniPlayer: true,   // 悬浮条右缘 950 < 迷你窗左缘 1024
+  awayFloatingBar:   true,      // 开关开 + 滚出视野 → 同样走悬浮条
+  backToFrame:       true,      // 回到画面里 → 撤销悬浮条，覆盖层 == 140,80,900x506
+  toggleOffRestores: true,      // 关掉开关 → 立刻恢复"隐藏"行为
+  noDragHandleInBar: true       // 悬浮条上没有拖动手柄
+}
+RESULT: PASS（全局显示悬浮条 + 离开画面自动隐藏 + 迷你播放器不贴小窗）
+```
+
+---
+
 ## 三、安装与使用
 
 ### 加载扩展
@@ -1105,6 +1256,10 @@ RESULT: PASS（生词本写成本机文件 + 卸载重装后可恢复 + 合并�
   不再出现"一屏字幕吃掉四分之一画面"。字号调到极大时还有自适应缩小兜底
 - **字幕贴视频画面**（不是贴浏览器窗口）：非全屏时精确落在播放器矩形内，影院模式 / 顶栏折叠 /
   改窗口大小都跟着走；**全屏时按画面宽度等比放大字号与行宽**，退出全屏又等比缩回
+- **离开画面就不显示**：视频框滚出视野（翻评论区）或缩成右下角迷你播放器（首页后台播放）时，
+  字幕整条隐藏 —— 不会再有"在首页浏览时还有字幕飘在内容上"的情况
+- **全局显示（可选开关）**：打开后，视频框不在视野里时字幕改成一个贴屏幕底部的悬浮条
+  （更小更实、不挡内容、没有拖动手柄）；迷你播放器在右下角时悬浮条自动让开那个小窗
 - **显示模式**：双语 / 仅译文 / 仅原文
 - **目标语言**：简体中文、繁体中文、日、韩、英、法、德、西、俄、葡（10 种）
 - **翻译引擎**：Google（推荐，快）/ MyMemory（备用）
@@ -1163,6 +1318,7 @@ node test-frame.js           # 字幕贴视频框 + 全屏等比放大 + 退全�
 node test-settings.js        # MyMemory 额度降级 + 引擎切换缓存 + 免点插件自动出字幕
 node test-forms.js           # 词形归一化：收藏 beverage 也高亮 beverages，点复数开同一词条
 node test-backup.js          # 生词本写本机文件 + 卸载重装后恢复 + 合并保留学习进度
+node test-global.js          # 全局显示悬浮条 + 离开画面自动隐藏 + 迷你播放器不贴小窗
 ```
 
 `tools/mock/` 用 Playwright `page.route()` 整体伪造 `https://www.youtube.com/**`，
@@ -1294,6 +1450,7 @@ D:\MyFiles\项目\Trace\
    ├─ test-frame.js             字幕贴视频框 + 全屏等比放大回归测试
    ├─ test-forms.js             词形归一化回归（单复数同高亮 + 两份实现一致性）
    ├─ test-backup.js            生词本落盘回归（写文件/卸载恢复/合并进度/自选目录）
+   ├─ test-global.js            全局显示悬浮条 + 离开画面隐藏 + 迷你播放器避让
    ├─ probe-ext2\               主世界 vs 隔离世界对照实验
    ├─ probe-transcript.js       get_transcript 接口探针
    ├─ gen-icons.js              纯 Node 生成 PNG 图标
@@ -1309,6 +1466,7 @@ D:\MyFiles\项目\Trace\
    ├─ shot-frame-fullscreen.png 全屏：字幕随画面等比放大
    ├─ shot-glass.png            毛玻璃 + 3 点拖动胶囊截图
    ├─ shot-forms.png            复数形式高亮 + 单数词卡截图
+   ├─ shot-global.png           全局显示悬浮条（避开右下角迷你播放器）截图
    ├─ test-settings.js          MyMemory 降级 / 引擎切换缓存 / 自动出字幕回归
    ├─ shot-settings.png         自动出字幕截图（未点插件）
    ├─ shot-backup.png           词库页备份区截图（选目录 + 自动备份开关）

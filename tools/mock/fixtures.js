@@ -184,6 +184,37 @@ function pageHtml(videoId = VIDEO_ID, opts = {}) {
       player.classList.toggle('ytp-fullscreen', !!on);
       return player.getBoundingClientRect();
     };
+
+    // ---- 模拟「视频框被滚出视野」/「缩成迷你播放器」----
+    // 真实 YouTube 里这两种情况分别是：往下翻评论区、切到首页后后台播放。
+    // 测试用它们验证「全局显示」开关与「离开画面就隐藏」。
+    const MP_LEFT = ${JSON.stringify(frame ? frame.left : 0)};
+    const MP_TOP = ${JSON.stringify(frame ? frame.top : 0)};
+    const MP_W = ${JSON.stringify(frame ? frame.width : 0)};
+    const MP_H = ${JSON.stringify(frame ? frame.height : 0)};
+    /** 把播放器移到指定矩形；传 null 恢复夹具原本的 frame 设置 */
+    window.__mockFrame = (rect) => {
+      if (!rect) {
+        player.style.left = MP_LEFT ? MP_LEFT + 'px' : '0px';
+        player.style.top = MP_TOP ? MP_TOP + 'px' : '0px';
+        player.style.width = MP_W ? MP_W + 'px' : '100vw';
+        player.style.height = MP_H ? MP_H + 'px' : '100vh';
+        return player.getBoundingClientRect();
+      }
+      player.style.left = rect.left + 'px';
+      player.style.top = rect.top + 'px';
+      player.style.width = rect.width + 'px';
+      player.style.height = rect.height + 'px';
+      return player.getBoundingClientRect();
+    };
+    /** 播放器滚出视野：整体挪到视口下方（模拟往下翻到评论区） */
+    window.__mockScrollAway = () => window.__mockFrame({
+      left: MP_LEFT || 0, top: window.innerHeight + 40, width: MP_W || 900, height: MP_H || 506,
+    });
+    /** 缩成右下角迷你播放器（模拟首页后台播放） */
+    window.__mockMini = () => window.__mockFrame({
+      left: window.innerWidth - 400 - 16, top: window.innerHeight - 225 - 16, width: 400, height: 225,
+    });
   })();
 </script>
 </body>

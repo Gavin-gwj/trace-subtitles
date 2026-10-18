@@ -29,6 +29,9 @@ const DEFAULT_SETTINGS = {
   radius: 12, // 圆角 px
   blur: 18, // 高斯模糊 px
   showLauncher: true, // 播放器右下角悬浮按钮
+  // 全局显示：视频框不在视野里时（切到别的页面 / 往下翻到评论区），
+  // 字幕改成贴屏幕底部的悬浮条继续跟播。关闭时只在视频框内显示。
+  globalMode: false,
   // ---- 生词本备份 ----
   // Chrome 卸载扩展时会清空 IndexedDB，所以生词本要额外落一份 JSON 到
   // 「下载/trace-subtitles/wordbook-backup.json」。默认开，改动后自动覆盖。

@@ -308,6 +308,10 @@
               <label class="tp-switch"><input type="checkbox" data-k="clickWord" /><span class="tp-slider"></span></label>
             </div>
             <div class="tp-row" style="padding-left:0;padding-right:0;">
+              <div class="tp-label">全局显示<div class="tp-sub">离开视频画面时改成贴底悬浮条</div></div>
+              <label class="tp-switch"><input type="checkbox" data-k="globalMode" /><span class="tp-slider"></span></label>
+            </div>
+            <div class="tp-row" style="padding-left:0;padding-right:0;">
               <div class="tp-label">显示悬浮按钮<div class="tp-sub">播放器右下角的 T 按钮</div></div>
               <label class="tp-switch"><input type="checkbox" data-k="showLauncher" /><span class="tp-slider"></span></label>
             </div>
@@ -427,11 +431,11 @@
   }
 
   /**
-   * 视频框在视口里的位置与尺寸。
+   * 视频框的原始矩形（不做任何兜底）。
    * 优先用 YouTube 的 #movie_player（它包含控制栏、比 video 元素略大），
-   * 拿不到就退回 video，再退回整个视口。
+   * 拿不到或尺寸小到不像播放器时返回 null。
    */
-  function overlayGeom() {
+  function playerRect() {
     const mp = document.getElementById('movie_player');
     const v = getVideo();
     const el = mp || v;
@@ -439,7 +443,61 @@
     if (r && r.width > 80 && r.height > 60) {
       return { left: r.left, top: r.top, width: r.width, height: r.height };
     }
+    return null;
+  }
+
+  function viewportGeom() {
     return { left: 0, top: 0, width: window.innerWidth, height: window.innerHeight };
+  }
+
+  /**
+   * 视频框在视口里露出了多少（0~1）以及是否算「在画面里」。
+   *
+   * 用「交集面积 / 视频框面积」判断，而不是只看 top/bottom：
+   * 往下翻评论区时视频框常常还露出一半，这时仍算在画面里，
+   * 不该突然切成悬浮条 —— 那会让字幕在屏幕上跳来跳去。
+   *
+   * 另外要把「迷你播放器」排除掉：在首页/别的页面上后台播放时，
+   * YouTube 会把播放器缩成右下角的小窗。它确实完整可见，但面积只有
+   * 视口的一小块，此时字幕贴上去只有几个像素高、根本没法读，
+   * 而且会在浏览首页时一直飘着。这种一律按「不在画面里」处理。
+   */
+  function frameVisibility() {
+    const r = playerRect();
+    if (!r) return { visible: false, ratio: 0, rect: null, mini: false };
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    const mini = r.width < vw * 0.5 && r.height < vh * 0.5;
+    const visW = Math.min(r.left + r.width, vw) - Math.max(r.left, 0);
+    const visH = Math.min(r.top + r.height, vh) - Math.max(r.top, 0);
+    if (visW <= 0 || visH <= 0) return { visible: false, ratio: 0, rect: r, mini };
+    const ratio = (visW * visH) / (r.width * r.height);
+    const visible = !mini && ratio >= 0.45 && visW > 80 && visH > 60;
+    return { visible, ratio, rect: r, mini };
+  }
+
+  /**
+   * 是否该切成「全局悬浮条」：开了全局显示、视频框几乎不在视野里、
+   * 但视频还在放（或还有字幕可显示）。
+   *
+   * 关掉全局显示时这个函数恒为 false，此时视频框离开视野就整条隐藏，
+   * 不会再出现「在首页/别的页面上飘着字幕」的情况。
+   */
+  function isGlobalBar() {
+    if (state.settings?.globalMode !== true) return false;
+    if (frameVisibility().visible) return false;
+    const v = getVideo();
+    if (!v) return false;
+    return !v.paused || !!state.active;
+  }
+
+  /**
+   * 覆盖层要贴住哪个矩形：正常是视频框，全局悬浮条模式下是整个视口，
+   * 视频框彻底消失时退回视口（随后会被 .trace-away 隐藏）。
+   */
+  function overlayGeom() {
+    if (isGlobalBar()) return viewportGeom();
+    return playerRect() || viewportGeom();
   }
 
   /** 是否处于真·全屏（YouTube 会把 .ytp-fullscreen 加到播放器上） */
@@ -472,19 +530,39 @@
    */
   function applyOverlayFrame() {
     if (!overlayEl) return;
-    const g = overlayGeom();
+    const bar = isGlobalBar();
+    const vis = frameVisibility();
+    const g = bar ? viewportGeom() : playerRect() || viewportGeom();
     const fs = isFullscreen();
     let scale = 1;
-    if (!fs) {
+    if (bar) {
+      // 悬浮条贴的是整个视口，不该按视频框宽度放大字号
+      scale = 1;
+    } else if (!fs) {
       baseFrameWidth = g.width;
     } else {
       const base = baseFrameWidth || g.width;
       scale = Math.max(1, Math.min(g.width / base, 2.8));
     }
-    const reserve = panelReservePx();
+    const reserve = bar ? 0 : panelReservePx();
+    // 悬浮条模式下，右下角的迷你播放器要给它让路（否则横穿小窗，两边都看不清）。
+    // 只有当播放器落在视口下半部分、且贴右侧时才算 —— 左侧的小窗不挡居中悬浮条。
+    let barReserve = 0;
+    if (bar && vis.mini && vis.rect) {
+      const r = vis.rect;
+      const inBottom = r.top + r.height / 2 > window.innerHeight * 0.5;
+      const onRight = r.left + r.width / 2 > window.innerWidth * 0.5;
+      if (inBottom && onRight) {
+        barReserve = Math.max(0, Math.round(window.innerWidth - r.left + 16));
+        barReserve = Math.min(barReserve, Math.round(window.innerWidth * 0.5));
+      }
+    }
+    // 视频框既不在视野里、又没开全局显示 → 整条隐藏。
+    // 这就是「在首页/别的页面上飘着字幕」的修复：没画面可贴就别显示。
+    const away = !bar && !vis.visible;
     const key = [
       Math.round(g.left), Math.round(g.top), Math.round(g.width), Math.round(g.height),
-      scale.toFixed(3), reserve,
+      scale.toFixed(3), reserve, barReserve, bar ? 'bar' : '', away ? 'away' : '',
     ].join(',');
     if (key === lastGeomKey) return;
     lastGeomKey = key;
@@ -495,11 +573,17 @@
     overlayEl.style.height = Math.round(g.height) + 'px';
     overlayEl.style.setProperty('--trace-vscale', scale.toFixed(3));
     overlayEl.style.setProperty('--trace-panel-reserve', reserve + 'px');
-    overlayEl.classList.toggle('trace-panel-open', isPanelOpen());
+    overlayEl.style.setProperty('--trace-bar-reserve', barReserve + 'px');
+    overlayEl.classList.toggle('trace-panel-open', !bar && isPanelOpen());
+    overlayEl.classList.toggle('trace-global', bar);
+    overlayEl.classList.toggle('trace-away', away);
 
-    // 视频框变形后，自由模式下的位置要重新夹紧（否则可能落到画面外）
+    // 视频框变形后，自由模式下的位置要重新夹紧（否则可能落到画面外）。
+    // 悬浮条模式下位置由 CSS 固定（贴屏幕底部），要清掉内联 top，
+    // 否则会带着上次在画面里的像素位置飘到屏幕中间。
     if (state.settings?.freePos && boxEl) {
-      reapplyFreePos();
+      if (bar) boxEl.style.top = '';
+      else reapplyFreePos();
     }
   }
 
@@ -1454,6 +1538,7 @@
     radius: 12,
     blur: 18,
     showLauncher: true,
+    globalMode: false,
   };
 
   /**

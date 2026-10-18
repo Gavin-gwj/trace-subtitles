@@ -37,6 +37,47 @@
   opacity: 0;
 }
 
+/* 视频框已经离开视野、又没开「全局显示」时整条隐藏。
+   以前这里什么都不做，于是切到首页/翻到评论区时字幕还飘在屏幕上 ——
+   既没有画面可贴，也挡住了页面内容。 */
+#trace-sub-overlay.trace-away {
+  opacity: 0;
+  visibility: hidden;
+}
+
+/* 全局显示：视频框不在视野里（切页面 / 翻到评论区），但视频还在放。
+   这时字幕改成贴屏幕底部的悬浮条，尺寸与位置都不再跟视频框挂钩。
+   用 fixed 而不是 absolute，因为此刻覆盖层本身贴的是整个视口；
+   两者在视觉上等价，但 fixed 能免掉父级坐标系换算的心智负担。 */
+#trace-sub-overlay.trace-global {
+  pointer-events: none;
+}
+
+#trace-sub-overlay.trace-global .trace-sub-box {
+  position: fixed;
+  left: calc((100% - var(--trace-bar-reserve, 0px)) / 2);
+  bottom: 6vh;
+  top: auto;
+  transform: translateX(-50%);
+  /* 悬浮条默认 86vw，但若右下角有迷你播放器就给它让路：
+     JS 实测播放器占掉多少右侧宽度写进 --trace-bar-reserve，
+     否则悬浮条会横穿那个小窗，两边都看不清。 */
+  max-width: min(86vw, 1100px, calc(100% - var(--trace-bar-reserve, 0px) - 32px));
+  border-radius: 14px;
+  /* 悬浮条是「页面上的一个部件」，不是画面的一部分，
+     所以比贴视频时更实、更小、更靠边，避免挡住正在读的内容。 */
+  background: rgba(20, 20, 23, .82);
+  backdrop-filter: blur(22px) saturate(150%);
+  -webkit-backdrop-filter: blur(22px) saturate(150%);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, .5), 0 0 0 1px rgba(255, 255, 255, .06);
+}
+
+/* 悬浮条不提供拖动手柄：它的位置由「贴屏幕底部」这个语义决定，
+   允许拖动会让人以为可以随便摆，但换个页面又跳回底部。 */
+#trace-sub-overlay.trace-global .trace-drag-handle {
+  display: none;
+}
+
 #trace-sub-overlay .trace-sub-box {
   position: absolute;
   left: 50%;

@@ -88,6 +88,7 @@ async function loadSettings() {
   $('position').value = s.position ?? 18;
   $('positionVal').textContent = (s.position ?? 18) + '%';
   $('clickWord').checked = s.clickWord !== false;
+  $('globalMode').checked = s.globalMode === true;
 }
 
 async function saveSettings(patch, retranslate = false) {
@@ -132,6 +133,7 @@ function initSettingsUI() {
     onChange: (v) => ($('positionVal').textContent = v + '%'),
   });
   bindSetting('clickWord', 'clickWord');
+  bindSetting('globalMode', 'globalMode');
 
   // 拖动过字幕框后回到「底部居中」预设位置
   $('resetPos').addEventListener('click', async (ev) => {
