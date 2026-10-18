@@ -1,0 +1,25 @@
+feat: 词形归一化 —— 收藏 beverage 也高亮 beverages
+
+生词本里存的是某个词形，视频里出现的可能是另一个。收藏 beverage 之后，
+后面那句 "attendants that serve you beverages" 里的复数既不高亮，点开还
+显示「＋ 加入生词本」，用户会以为生词本坏了。
+
+做法：不引 NLP 库，改成「给一个词形，列出它可能对应的其它词形」，
+匹配时看两个集合有没有交集。多给的候选只有在生词本里真有那个词时才命中，
+误报代价极低。
+
+- subtitles.js / bg.js 各一份 wordForms()（两个世界不能共享模块），
+  用 >>> WORD_FORMS_BEGIN/END 包起来，test-forms.js 逐行比对两份是否一致
+- 双向生成候选：beverages→beverage 与 beverage→beverages 都要
+- INVARIANT 白名单（news/series/data…）防止 news 被砍成 new
+- 已经像变形词的不再正向展开，避免 beverageses 这类垃圾候选
+- 不收不规则动词（saw/left/found 同形冲突），收不规则名词复数
+- matchSaved() 精确命中优先，返回「生词本里那个词」而不是屏幕上的词形
+- 三处同时归一化：content.js findSaved/renderWords、bg.js markWords、bg.js hasWord
+  缺一处就会「英文高亮但中文不高亮」或「按钮显示加入生词本」
+- tools/test-forms.js：9 项断言（两份实现一致 / 单元 / 无误报 /
+  单复数都高亮 / data-w 归一化 / 点复数开单数词卡）
+- fixtures.js 的 json3Body 与 pageHtml 支持自定义 cues，便于构造单复数配对句
+
+实测：singular saved:true w:beverage / plural saved:true w:beverage /
+click btnText:"✓ 已在生词本" btnAct:"remove"

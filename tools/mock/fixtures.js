@@ -60,8 +60,8 @@ function playerResponse(videoId = VIDEO_ID) {
   };
 }
 
-function json3Body() {
-  const events = CUES.map(([t, d, text]) => ({
+function json3Body(cues = CUES) {
+  const events = cues.map(([t, d, text]) => ({
     tStartMs: Math.round(t * 1000),
     dDurationMs: Math.round(d * 1000),
     segs: [{ utf8: text }],
@@ -73,6 +73,9 @@ function pageHtml(videoId = VIDEO_ID, opts = {}) {
   // potMode: 模拟新版 YouTube —— 没有 pot 签名的 timedtext 请求返回 200 + 空 body，
   // 只有页面自己发出的带 pot 请求才有内容。用于回归测试「网络钩子」路径。
   const potMode = !!opts.potMode;
+  // cues: 自定义字幕（同时影响播放器时间轴总长），测试「词形变化」时用单复数配对句
+  const cues = opts.cues || CUES;
+  const total = cues[cues.length - 1][0] + cues[cues.length - 1][1];
   // frame: 模拟「非全屏」时播放器只是页面里的一块矩形（上方顶栏、右侧推荐栏）。
   // 不给就是铺满视口（旧行为）。测试用它验证字幕贴的是视频框而不是视口。
   const frame = opts.frame || null;
@@ -105,13 +108,13 @@ function pageHtml(videoId = VIDEO_ID, opts = {}) {
     <canvas width="960" height="540"></canvas>
     <button class="ytp-subtitles-button" aria-pressed="false" style="position:absolute;left:8px;bottom:8px;z-index:5">CC</button>
   </div>
-  <div class="hint">Mock YouTube player · 0 – ${TOTAL.toFixed(1)}s captions · videoId=${videoId}${
+  <div class="hint">Mock YouTube player · 0 – ${total.toFixed(1)}s captions · videoId=${videoId}${
     potMode ? ' · POT MODE (direct timedtext returns empty)' : ''
   }</div>
 <script>
   const VIDEO_ID = ${JSON.stringify(videoId)};
   const PLAYER_RESPONSE = ${JSON.stringify(playerResponse(videoId))};
-  const TOTAL = ${TOTAL};
+  const TOTAL = ${total};
   const POT_MODE = ${potMode};
 
   // ---- 模拟 YouTube 播放器对象 ----

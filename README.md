@@ -188,9 +188,9 @@ AI 总结
 |---|---|
 | `manifest.json` | MV3 声明；两组 content_scripts（主世界 + 隔离世界）；host 权限只开 4 个域 |
 | `main-world.js` | 跑在页面主世界：读 `getPlayerResponse()` / `getOption('captions','tracklist')`，`fetch` 字幕正文，`postMessage` 桥接 |
-| `subtitles.js` | 纯函数库：`parse()`（json3/srv3）、`segment()`（智能分句）、`hash()`、`findByTime()` |
-| `content.js` | 隔离世界主控：轨道选择、批量翻译、双层字幕渲染、rAF 推进、点词、查词弹窗、生词高亮、悬浮按钮与页内面板 |
-| `bg.js` | Service Worker：设置、翻译（Google + MyMemory 降级）、词典、IndexedDB 缓存与生词本 |
+| `subtitles.js` | 纯函数库：`parse()`（json3/srv3）、`segment()`（智能分句）、`hash()`、`findByTime()`、`wordForms()`（词形归一化） |
+| `content.js` | 隔离世界主控：轨道选择、批量翻译、双层字幕渲染、rAF 推进、点词、查词弹窗、生词高亮（含词形变化）、悬浮按钮与页内面板 |
+| `bg.js` | Service Worker：设置、翻译（Google + MyMemory 降级）、词典、IndexedDB 缓存与生词本、哨兵对齐（`markWords` / `parseMarked`） |
 | `overlay.css` | 字幕覆盖层 + 查词弹窗 + 悬浮按钮 + 页内设置面板样式 |
 | `theme.css` | **共享设计系统**（墨黑分层底 + 暖金强调 + 字体/圆角/按钮/卡片原子类），被 popup 与词库页共用 |
 | `popup.html` / `popup.js` | 工具栏弹窗：设置 + 生词本精简列表 |
@@ -804,6 +804,87 @@ B 用例能测出问题，靠的是**给两个引擎不同的可辨识输出**�
 早期版本里 MyMemory 降级到 Google、两边输出一模一样，这个断言其实**永远为真**，
 测不出任何东西 —— 这是写降级链测试时最容易踩的坑。
 
+### 词形归一化：收藏 beverage，也要高亮 beverages
+
+生词本里存的是**某个词形**，但视频里出现的可能是另一个。收藏 `beverage` 之后，
+后面那句 `attendants that serve you beverages` 里的复数形式既不高亮、点开还显示
+「＋ 加入生词本」—— 用户会以为生词本坏了。
+
+**为什么不用词干化（stemming）或词形还原（lemmatization）**：
+不引第三方 NLP 库（扩展要离线可用、体积敏感）。改成「给一个词形，列出它可能对应的
+其它词形」，匹配时看两个集合有没有交集。多给的候选只有在生词本里**真有那个词**时才命中，
+误报代价极低 —— 宁可多给候选，也不漏掉词形变化。
+
+`wordForms(w)` 双向生成候选：
+
+```js
+// 反向：beverages → beverage
+if (/s$/.test(word) && !/ss$/.test(word) && !/us$/.test(word) && !/is$/.test(word)) {
+  out.add(word.slice(0, -1));
+}
+// 正向：beverage → beverages（只在生词本里真有 beverages 时才命中）
+else addForm(word + 's');
+```
+
+四条边界，每一条都是踩过才知道要加的：
+
+1. **必须双向**。只做 `beverages → beverage` 的话，先收藏了复数形式就永远匹配不到单数。
+2. **单复数同形/不可数词要白名单**（`INVARIANT`：news / series / species / data / media …）。
+   否则 `news` 会被 `-s` 规则砍成 `new`，收藏 `new` 又会让满屏 `news` 高亮。
+3. **已经像变形词的（`-s/-es/-ed/-ing/-er/-est`）不再正向展开**，否则
+   `beverages` 会派生出 `beverageses`、`beveragesed` 这种永远匹配不上的垃圾候选。
+4. **不收不规则动词**。`saw`（锯子）vs `saw`（see 的过去式）、`left`（左）vs `left`（leave 的过去式）、
+   `found`（建立）vs `found`（find 的过去式）—— 同形冲突太多，误报比漏报更烦人。
+   不规则**名词**复数（children / knives / halves …）是安全的，收。
+   `be / have / do` 三族也一律不收（is / are / was / has / had / does）：超高频功能词，
+   一旦收藏整屏都在高亮。
+
+**匹配时返回「生词本里那个词」，不是屏幕上那个词**：
+
+```js
+function matchSaved(rawWord, set) {
+  const w = String(rawWord || '').toLowerCase();
+  if (!w) return null;
+  if (set.has(w)) return w;                      // 精确命中优先
+  for (const cand of wordForms(w)) {
+    if (cand !== w && set.has(cand)) return cand; // 词形展开命中
+  }
+  return null;
+}
+```
+
+精确命中优先是必须的：生词本里同时有 `beverage` 和 `beverages` 时，字幕里的 `beverages`
+必须归到 `beverages`，否则点它会显示另一个词条的释义。归一化后的词写进
+`data-w`，所以点复数形式打开的是单数词卡、按钮显示「✓ 已在生词本」。
+
+这条链要**三处同时归一化**，缺一处就前后矛盾：
+
+| 位置 | 作用 | 不一致的后果 |
+|---|---|---|
+| `content.js` `findSaved()` / `renderWords()` | 决定英文词是否加 `trace-saved`、`data-w` 存什么 | 不归一化 → 复数不高亮 |
+| `bg.js` `markWords()` | 决定送翻译时给哪些词打哨兵 | 不归一化 → 中文侧没有对应高亮 |
+| `bg.js` `hasWord()` | 回答「这个词在生词本里吗」 | 不归一化 → 按钮显示「加入生词本」 |
+
+`wordForms` 在 `subtitles.js`（内容脚本世界）和 `bg.js`（Service Worker 世界）各有一份
+—— 两个世界不能共享模块，只能复制。为防止改一处忘另一处，两份都用
+`// >>> WORD_FORMS_BEGIN` / `// >>> WORD_FORMS_END` 包起来，`tools/test-forms.js`
+第一件事就是抽出两段逐行比对（忽略缩进），不一致直接 FAIL。
+
+实测（`node test-forms.js`）：
+
+```
+WORD_FORMS blocks identical: true (4653 chars)
+wordForms unit: {"misses":[],"falsePositives":[]}
+singular: {"target":{"text":"beverage","saved":true,"w":"beverage"}}
+plural  : {"target":{"text":"beverages","saved":true,"w":"beverage"}}
+click   : {"word":"beverage","btnText":"✓ 已在生词本","btnAct":"remove"}
+RESULT: PASS（词形归一化：单复数都高亮，点复数打开同一词条）
+```
+
+写这个测试时也踩了一个坑：弹窗里第一个 `[data-act]` 是右上角的关闭按钮
+（`data-act="close"`），选择器写成 `[data-act]` 会把「×」当成收藏按钮的文案，
+断言恒为 FAIL。要显式选 `[data-act="add"], [data-act="remove"]`。
+
 ### 界面重设计：从"能用"到"像产品"
 
 复刻完功能后，界面做了两轮视觉重构。核心决定是**放弃"每个页面各写一套 CSS"**，先抽出一套
@@ -901,6 +982,8 @@ function niceScale(raw) {
   搜索、单词抽屉（所在句子 + 跳回视频）、复习与删除 —— 数据全在本机，离线可用
 - **生词高亮（跨视频生效）**：任何已加入生词本的单词，在**所有** YouTube 视频的字幕里都会
   自动高亮（黄色底色 + 下划线），不需要重新加入
+- **词形变化一并高亮**：收藏 `beverage` 之后，字幕里的 `beverages` 也高亮，点它打开的还是
+  `beverage` 那张词卡（单复数、-ed/-ing、比较级、不规则复数都覆盖；不猜不规则动词）
 - **译文对应词也高亮**：不只是英文原文，**中文译文里对应的那几个字**同样会高亮
   （青色 + 斜体 + 虚线下划线），一眼就能看出这个词在这句话里被译成了什么
 - **状态记忆**：再次点击已加入的词，弹窗按钮显示「✓ 已在生词本」，点一下即可移除
@@ -926,6 +1009,7 @@ node test-zh-highlight.js    # 译文里对应中文也高亮（多词 / 点击 
 node test-wordbook.js        # 词库看板：KPI/状态环/柱状图/筛选/搜索/抽屉/复习/删除/粒度切换
 node test-frame.js           # 字幕贴视频框 + 全屏等比放大 + 退全屏缩回，截图 shot-frame-*.png
 node test-settings.js        # MyMemory 额度降级 + 引擎切换缓存 + 免点插件自动出字幕
+node test-forms.js           # 词形归一化：收藏 beverage 也高亮 beverages，点复数开同一词条
 ```
 
 `tools/mock/` 用 Playwright `page.route()` 整体伪造 `https://www.youtube.com/**`，
@@ -1049,6 +1133,7 @@ D:\MyFiles\项目\Trace\
    ├─ test-zh-highlight.js      译文里对应中文高亮回归测试（多词/点击/移除）
    ├─ test-wordbook.js          词库看板回归测试（KPI/图表/筛选/抽屉/复习）
    ├─ test-frame.js             字幕贴视频框 + 全屏等比放大回归测试
+   ├─ test-forms.js             词形归一化回归（单复数同高亮 + 两份实现一致性）
    ├─ probe-ext2\               主世界 vs 隔离世界对照实验
    ├─ probe-transcript.js       get_transcript 接口探针
    ├─ gen-icons.js              纯 Node 生成 PNG 图标
@@ -1063,6 +1148,7 @@ D:\MyFiles\项目\Trace\
    ├─ shot-frame-normal.png     非全屏：字幕落在视频画面内
    ├─ shot-frame-fullscreen.png 全屏：字幕随画面等比放大
    ├─ shot-glass.png            毛玻璃 + 3 点拖动胶囊截图
+   ├─ shot-forms.png            复数形式高亮 + 单数词卡截图
    ├─ test-settings.js          MyMemory 降级 / 引擎切换缓存 / 自动出字幕回归
    └─ shot-settings.png         自动出字幕截图（未点插件）
 ```

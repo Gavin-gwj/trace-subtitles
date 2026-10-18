@@ -751,6 +751,26 @@
     transEl.innerHTML = html;
   }
 
+  /**
+   * 字幕里的一个词形，命中生词本里的哪个词？
+   * 命中返回**生词本里的那个词**（小写），未命中返回 null。
+   *
+   * 词形归一化由 subtitles.js 的 wordForms() 提供（与 bg.js 里同一份实现）：
+   * 收藏 beverage 之后，字幕里的 beverages 也要高亮、也要能点开同一张生词卡。
+   * 精确命中优先，避免生词本里同时有 beverage 和 beverages 时串到另一个词条。
+   */
+  function findSaved(rawWord) {
+    const w = String(rawWord || '').toLowerCase();
+    if (!w || !state.wordSet || !state.wordSet.size) return null;
+    if (state.wordSet.has(w)) return w;
+    const S = window.TraceSubs;
+    if (!S || typeof S.wordForms !== 'function') return null;
+    for (const cand of S.wordForms(w)) {
+      if (cand !== w && state.wordSet.has(cand)) return cand;
+    }
+    return null;
+  }
+
   /** 这句话里哪些词是生词（小写集合），用于后台打标记 */
   function collectSavedWords(text) {
     if (!state.wordSet || !state.wordSet.size) return null;
@@ -758,8 +778,8 @@
     const re = /[A-Za-z][A-Za-z'’-]*/g;
     let m;
     while ((m = re.exec(text))) {
-      const w = m[0].toLowerCase();
-      if (state.wordSet.has(w)) found.add(w);
+      const canon = findSaved(m[0]);
+      if (canon) found.add(canon);
     }
     return found.size ? found : null;
   }
@@ -773,10 +793,15 @@
         const m = tok.match(/^([^\p{L}\p{N}']*)([\p{L}\p{N}'-]+)([^\p{L}\p{N}']*)$/u);
         if (!m) return escapeHtml(tok);
         const [, pre, word, post] = m;
-        const saved = state.wordSet.has(word.toLowerCase());
+        // 命中生词本（含词形变化）时，data-w 记**生词本里的那个词**，
+        // 这样点 beverages 打开的是 beverage 的词卡，按钮显示「✓ 已在生词本」。
+        const canon = findSaved(word);
+        const saved = !!canon;
         return (
           escapeHtml(pre) +
-          `<span class="trace-word${saved ? ' trace-saved' : ''}" data-w="${escapeAttr(word)}">` +
+          `<span class="trace-word${saved ? ' trace-saved' : ''}" data-w="${escapeAttr(
+            canon || word
+          )}">` +
           escapeHtml(word) +
           '</span>' +
           escapeHtml(post)
@@ -1185,9 +1210,12 @@
 
     const rect = el.getBoundingClientRect();
     const pop = ensurePopup();
+    // data-w 在渲染时已归一化成生词本里的那个词（点 beverages 拿到 beverage），
+    // 但历史渲染结果或手动构造的节点可能还是原始词形，这里再归一化一次兜底。
+    const canon = findSaved(word) || word;
     state.wordPopup = {
-      word,
-      saved: state.wordSet.has(word.toLowerCase()),
+      word: canon,
+      saved: !!findSaved(word),
       context: state.active?.text || '',
       contextZh: state.active?.zh || '',
     };
@@ -1203,21 +1231,21 @@
 
     // 查词与"是否已在生词本"并行，后者很快，先更新一次状态
     const savedTask = chrome.runtime
-      .sendMessage({ type: 'word:has', word })
+      .sendMessage({ type: 'word:has', word: canon })
       .then((r) => (r && r.ok ? !!r.data : false))
       .catch(() => state.wordPopup?.saved || false);
 
     let dict = null;
     try {
-      const r = await chrome.runtime.sendMessage({ type: 'dict', word });
+      const r = await chrome.runtime.sendMessage({ type: 'dict', word: canon });
       if (r && r.ok) dict = r.data;
     } catch (_) {}
 
     const saved = await savedTask;
     if (state.wordPopup) state.wordPopup.saved = saved;
     // 以服务端（IndexedDB）结果为准同步高亮集合
-    if (saved) state.wordSet.add(word.toLowerCase());
-    else state.wordSet.delete(word.toLowerCase());
+    if (saved) state.wordSet.add(canon);
+    else state.wordSet.delete(canon);
 
     if (!dict) {
       pop.querySelector('.trace-pop-body').innerHTML =

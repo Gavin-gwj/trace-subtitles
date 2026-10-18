@@ -395,6 +395,138 @@ function stripMarkers(raw) {
   return raw.replace(/[\u27E6\u27E7]/g, '');
 }
 
+// >>> WORD_FORMS_BEGIN  (本段在 subtitles.js 与 bg.js 里各有一份，内容必须一致，tools/test-forms.js 会逐行比对)
+// 生词本存的是某个词形（beverage），字幕里出现的可能是另一个词形（beverages）。
+// 这里给出「一个词形可能对应的其它词形」，匹配时看两个集合有没有交集。
+// 取舍：
+//   1) 只做形态学猜测，不做词性标注 —— 多出来的候选只有在生词本里真有那个词时才命中，
+//      误报代价很低；宁可多给候选，也不漏掉词形变化。
+//   2) 双向都生成：存了 beverage 要能命中 beverages，存了 beverages 也要能命中 beverage。
+//   3) 收录不规则**名词**复数（children / knives / halves…），不收录不规则**动词**：
+//      saw(锯子)/saw(see 的过去式)、left(左)/left(leave 的过去式)、found(建立)/found(find 的过去式)
+//      这类同形冲突太多，误报比漏报更烦人。
+//   4) be / have / do 三族一律不收（is/are/was/has/had/does…）：超高频功能词，
+//      一旦收藏会让整屏字幕都在高亮，纯噪音。长度 < 4 的词也不做形态猜测。
+//   5) 单复数同形或不可数词（news/series/species/data…）列进 INVARIANT，
+//      既不拆成词干（news 不能变成 new），也不接受正向加 s。
+const IRREGULAR = {
+  // ---- 不规则复数 ----
+  children: 'child', men: 'man', women: 'woman', people: 'person',
+  feet: 'foot', teeth: 'tooth', mice: 'mouse', geese: 'goose', oxen: 'ox', lice: 'louse',
+  halves: 'half', knives: 'knife', wives: 'wife', lives: 'life', leaves: 'leaf',
+  loaves: 'loaf', thieves: 'thief', shelves: 'shelf', wolves: 'wolf', calves: 'calf',
+  elves: 'elf', scarves: 'scarf', hooves: 'hoof', selves: 'self',
+};
+
+/** 单复数同形 / 不可数：不能再套 -s 规则（否则 news 会变成 new） */
+const INVARIANT = new Set([
+  'news', 'series', 'species', 'means', 'physics', 'mathematics', 'economics',
+  'politics', 'ethics', 'measles', 'data', 'media',
+]);
+
+/** 返回这个词形可能对应的其它词形（含自身，统一小写） */
+function wordForms(w) {
+  const word = String(w || '').toLowerCase();
+  const out = new Set([word]);
+  if (!word) return out;
+  const irr = IRREGULAR[word];
+  if (irr) out.add(irr);
+  if (word.length < 4) return out;
+  const invariant = INVARIANT.has(word);
+
+  // ===== 反向：把变形还原成原形（beverages → beverage）=====
+  if (!invariant) {
+    if (/(?:s|x|z|ch|sh)es$/.test(word)) out.add(word.slice(0, -2)); // boxes→box
+    if (/[^aeiou]ies$/.test(word)) out.add(word.slice(0, -3) + 'y'); // cities→city
+    if (/[^aeiou]ves$/.test(word)) {
+      const stem = word.slice(0, -3);
+      out.add(stem + 'f'); // wolves→wolf
+      out.add(stem + 'fe'); // knives→knife
+    }
+    if (/s$/.test(word) && !/ss$/.test(word) && !/us$/.test(word) && !/is$/.test(word)) {
+      out.add(word.slice(0, -1)); // beverages→beverage
+    }
+  }
+  if (/ied$/.test(word)) out.add(word.slice(0, -3) + 'y'); // carried→carry
+  else if (/ed$/.test(word)) {
+    const base = word.slice(0, -2);
+    out.add(base); // walked→walk
+    if (/([bcdfgklmnprstvz])\1$/.test(base)) out.add(base.slice(0, -1)); // stopped→stop
+    if (base.length >= 2 && !/^(sh|th|wh|ye|the)$/.test(base)) out.add(base + 'e'); // used→use
+  }
+  if (/ing$/.test(word) && word.length > 5) {
+    const base = word.slice(0, -3);
+    out.add(base); // walking→walk
+    if (/([bcdfgklmnprstvz])\1$/.test(base)) out.add(base.slice(0, -1)); // running→run
+    if (base.length >= 2 && !/^(sh|th|wh|ye|the)$/.test(base)) out.add(base + 'e'); // making→make
+  }
+  if (/ier$/.test(word)) out.add(word.slice(0, -3) + 'y'); // happier→happy
+  else if (/er$/.test(word) && word.length > 5) {
+    const base = word.slice(0, -2);
+    out.add(base); // faster→fast
+    if (/([bcdfgklmnprstvz])\1$/.test(base)) out.add(base.slice(0, -1)); // bigger→big
+  }
+  if (/iest$/.test(word)) out.add(word.slice(0, -4) + 'y'); // happiest→happy
+  else if (/est$/.test(word) && word.length > 6) {
+    const base = word.slice(0, -3);
+    out.add(base); // fastest→fast
+    if (/([bcdfgklmnprstvz])\1$/.test(base)) out.add(base.slice(0, -1)); // biggest→big
+  }
+
+  // ===== 正向：把原形展开成常见变形（beverage → beverages）=====
+  // 只在生词本里真有那个词时才命中，所以多给几个候选不会让画面变乱。
+  // 唯一要防的是「展开出来的词本身是高频词」：如果结果是 INVARIANT 里的词就不加，
+  // 否则收藏了 new 会让所有 news 都高亮。
+  // 已经像变形词的（-s/-es/-ed/-ing/-er/-est）不再继续展开，
+  // 否则 beverages 会派生出 beverageses 这种永远匹配不上的垃圾候选。
+  const looksInflected = /(?:s|ed|ing|er|est)$/.test(word);
+  if (!invariant && !looksInflected) {
+    const addForm = (f) => { if (!INVARIANT.has(f)) out.add(f); };
+    // 复数 / 三单
+    if (/[^aeiou]y$/.test(word)) addForm(word.slice(0, -1) + 'ies'); // city→cities
+    else if (/(?:s|x|z|ch|sh)$/.test(word)) addForm(word + 'es'); // box→boxes
+    else addForm(word + 's'); // beverage→beverages
+    if (/fe$/.test(word)) addForm(word.slice(0, -2) + 'ves'); // knife→knives
+    else if (/f$/.test(word)) addForm(word.slice(0, -1) + 'ves'); // half→halves
+    // 过去式 / 现在分词
+    if (/e$/.test(word)) {
+      addForm(word + 'd'); // use→used
+      addForm(word.slice(0, -1) + 'ing'); // make→making
+    } else if (/[^aeiou]y$/.test(word)) {
+      addForm(word.slice(0, -1) + 'ied'); // carry→carried
+      addForm(word + 'ing');
+    } else {
+      addForm(word + 'ed'); // walk→walked
+      addForm(word + 'ing'); // walk→walking
+    }
+    // 比较级 / 最高级（短词才加）
+    if (word.length <= 6) {
+      if (/[^aeiou]y$/.test(word)) { addForm(word.slice(0, -1) + 'ier'); addForm(word.slice(0, -1) + 'iest'); }
+      else { addForm(word + 'er'); addForm(word + 'est'); }
+    }
+  }
+
+  return out;
+}
+// >>> WORD_FORMS_END
+
+/**
+ * 字幕里的一个词形，命中生词本里的哪个词？
+ * 命中返回**生词本里的那个词**（小写），未命中返回 null。
+ *
+ * 优先精确命中，其次才做词形展开比较 —— 生词本里同时有 beverage 和 beverages 时，
+ * 字幕里的 beverages 必须归到 beverages，否则点它会显示另一个词条的释义。
+ */
+function matchSaved(rawWord, set) {
+  const w = String(rawWord || '').toLowerCase();
+  if (!w) return null;
+  if (set.has(w)) return w;
+  for (const cand of wordForms(w)) {
+    if (cand !== w && set.has(cand)) return cand;
+  }
+  return null;
+}
+
 /** 把 text 里出现在 wordSet 中的单词包上哨兵，返回 {marked, slots} */
 function markWords(text, wordSet) {
   // wordSet 可能是 Set，也可能是从消息里传来的数组（JSON 不支持 Set）。
@@ -411,8 +543,12 @@ function markWords(text, wordSet) {
   const re = /[A-Za-z][A-Za-z'’-]*/g;
   let m;
   while ((m = re.exec(text))) {
-    if (set.has(m[0].toLowerCase())) {
-      hits.push({ start: m.index, end: m.index + m[0].length, word: m[0] });
+    // 词形匹配：beverages 要能命中生词本里的 beverage。
+    // slot.word 记**生词本里那个词**（不是字幕里的词形），
+    // 这样点中文高亮时打开的是已收藏词条的卡片，而不是一个「未收藏」的复数形式。
+    const canon = matchSaved(m[0], set);
+    if (canon) {
+      hits.push({ start: m.index, end: m.index + m[0].length, word: canon });
     }
   }
   if (!hits.length) return { marked: text, slots };
@@ -874,7 +1010,13 @@ async function wordKeys() {
 
 async function hasWord(word) {
   if (!word) return false;
-  return !!(await idbGet('words', String(word).toLowerCase()));
+  const w = String(word).toLowerCase();
+  if (await idbGet('words', w)) return true;
+  // 词形变化也算「已在生词本」：收藏了 beverage，问 beverages 时应当回答 true，
+  // 否则查词卡会显示「加入生词本」，与字幕上的高亮状态自相矛盾。
+  const keys = await wordKeys();
+  const set = new Set(keys.map((k) => String(k).toLowerCase()));
+  return !!matchSaved(w, set);
 }
 
 /** 通知所有 YouTube 标签页：生词本变了，重新拉取高亮词表 */
@@ -1048,6 +1190,9 @@ globalThis.__traceDebug = {
   translateAligned,
   markWords,
   parseMarked,
+  /** 词形归一化：字幕里的词形能命中生词本里的哪个词（含单复数等变化） */
+  wordForms,
+  matchSaved,
   lookupWord,
   addWord,
   /** 测试辅助：与消息路由 'word:add' 完全同一条路径（写入 + 广播） */
