@@ -536,6 +536,18 @@
       background: var(--gold-soft);
       border: 1px solid rgba(255, 215, 110, 0.18);
     }
+    /* 短语徽标：用引号代替首字母，一眼就能和单词行区分 */
+    .w-ico-phrase {
+      font-size: 12px;
+      text-transform: none;
+      color: var(--violet);
+      background: rgba(139, 127, 240, 0.13);
+      border-color: rgba(139, 127, 240, 0.28);
+    }
+    .wrow-phrase .w-txt {
+      font-style: normal;
+      letter-spacing: 0;
+    }
     .w-word {
       font-family: var(--font-display);
       font-size: 13px;
@@ -707,6 +719,43 @@
       color: var(--text-3);
       margin-top: 5px;
       font-size: 11.5px;
+    }
+    /* 短语抽屉：逐词对照表 + 逐词直译 + 说明 */
+    .dw-words {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+    .dw-wrow {
+      display: flex;
+      gap: 10px;
+      align-items: baseline;
+      font-size: 12px;
+      line-height: 1.6;
+    }
+    .dw-wrow b {
+      flex: none;
+      min-width: 78px;
+      color: var(--text-3);
+      font-weight: 600;
+    }
+    .dw-wrow span {
+      color: var(--text-1);
+    }
+    .dw-literal {
+      margin-top: 6px;
+      font-size: 11.5px;
+      color: var(--text-3);
+    }
+    .dw-note {
+      margin-top: 7px;
+      padding: 6px 9px;
+      border-radius: var(--r-sm);
+      background: rgba(245, 166, 35, 0.1);
+      border-left: 2px solid var(--amber);
+      font-size: 11.5px;
+      line-height: 1.55;
+      color: #e8c98a;
     }
     .dw-meta {
       display: grid;
@@ -902,6 +951,10 @@
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14"/><path d="M5 12h14"/></svg>
         新词<span class="count" id="cNew">0</span>
       </button>
+      <button data-view="phrase">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16"/><path d="M4 12h10"/><path d="M4 17h7"/></svg>
+        短语<span class="count" id="cPhrase">0</span>
+      </button>
     </div>
 
     <div class="side-label">备份</div>
@@ -1035,6 +1088,7 @@
         <span class="chip" data-f="new">新词</span>
         <span class="chip" data-f="learning">记忆中</span>
         <span class="chip" data-f="learned">已记住</span>
+        <span class="chip" data-f="phrase">短语</span>
         <span style="flex: 1"></span>
         <select class="select" id="sort" style="font-size: 11.5px">
           <option value="new">最新加入</option>

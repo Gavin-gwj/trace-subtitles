@@ -184,6 +184,9 @@ function renderKPIs() {
   setCount($('cLearned'), learned);
   setCount($('cLearning'), learning);
   setCount($('cNew'), all.filter((w) => (w.status || 'new') === 'new').length);
+  // 短语单独一栏：它们的记录结构和单词不同（没有音标/词性，有逐词对照），
+  // 混在单词列表里既占位置又难扫读。
+  setCount($('cPhrase'), all.filter((w) => w.kind === 'phrase').length);
 
   // 4 条迷你折线：总量累计 / 已记住累计 / 记忆中累计 / 每日新增
   const last14 = [];
@@ -337,8 +340,11 @@ function visibleWords() {
   const q = ($('q').value || '').trim().toLowerCase();
   let list = all;
 
-  if (view !== 'all') {
-    list = list.filter((w) => (w.status || 'new') === view);
+  // 短语视图：按记录类型过滤，不按学习状态
+  if (view === 'phrase') {
+    list = list.filter((w) => w.kind === 'phrase');
+  } else if (view !== 'all') {
+    list = list.filter((w) => (w.status || 'new') === view && w.kind !== 'phrase');
   }
   if (q) {
     list = list.filter(
@@ -383,14 +389,23 @@ function renderRows() {
   box.innerHTML = list
     .map((w, i) => {
       const st = w.status || 'new';
+      const isPhrase = w.kind === 'phrase';
+      // 短语没有音标，那一列改用"来源"（大模型/机器翻译）——
+      // 用户扫列表时更需要知道这条释义可信度，而不是一个空列。
+      const SRC_LABEL = { llm: '大模型', google: '机翻', literal: '直译' };
+      const meta = isPhrase
+        ? SRC_LABEL[w.source] || '短语'
+        : esc(w.phonetic || '');
       return `
-      <div class="wrow" data-w="${esc(w.word)}" style="--i:${Math.min(i, 14)}">
-        <div class="w-ico">${esc((w.display || w.word || '?').charAt(0))}</div>
+      <div class="wrow${isPhrase ? ' wrow-phrase' : ''}" data-w="${esc(w.word)}" style="--i:${Math.min(i, 14)}">
+        <div class="w-ico${isPhrase ? ' w-ico-phrase' : ''}">${
+        isPhrase ? '“”' : esc((w.display || w.word || '?').charAt(0))
+      }</div>
         <div class="w-word">
           <span class="w-txt">${esc(w.display || w.word)}</span>
           <span class="pill pill-${st}">${STATUS_LABEL[st]}</span>
         </div>
-        <div class="w-phon">${esc(w.phonetic || '')}</div>
+        <div class="w-phon">${meta}</div>
         <div class="w-zh">${esc(w.zh || w.context || '')}</div>
         <div class="w-date">${fmtDate(w.createdAt)}</div>
         <div class="w-act">
@@ -428,7 +443,10 @@ function openDrawer(word) {
   selected = w;
 
   $('dwWord').textContent = w.display || w.word;
-  $('dwPhon').textContent = w.phonetic || '';
+  // 短语没有音标；那一行改成来源标签，比留空有用
+  const SRC_LABEL = { llm: '大模型释义', google: '机器翻译', literal: '逐词直译' };
+  $('dwPhon').textContent =
+    w.kind === 'phrase' ? SRC_LABEL[w.source] || '短语' : w.phonetic || '';
 
   const st = w.status || 'new';
   const ctx = w.context
@@ -438,11 +456,42 @@ function openDrawer(word) {
        </div>`
     : '<div class="dw-quote" style="color:var(--text-4)">没有保存上下文</div>';
 
+  // 短语的"逐词对照"是它区别于单词卡的核心内容：单词只要一条释义，
+  // 短语必须让用户看到每个词各是什么，才能理解整段为什么这么翻。
+  const wordsBlock =
+    w.kind === 'phrase' && Array.isArray(w.words) && w.words.length
+      ? `<div class="dw-sec">
+           <div class="dw-sec-hd">逐词对照</div>
+           <div class="dw-words">
+             ${w.words
+               .map(
+                 (x) =>
+                   `<div class="dw-wrow"><b>${esc(x.w || '')}</b><span>${esc(
+                     x.zh || '—'
+                   )}</span></div>`
+               )
+               .join('')}
+           </div>
+         </div>`
+      : '';
+
   $('dwBody').innerHTML = `
     <div class="dw-sec">
       <div class="dw-sec-hd">释义</div>
       <div class="dw-zh">${esc(w.zh || '—')}</div>
+      ${
+        w.kind === 'phrase' && w.literal && w.literal !== w.zh
+          ? `<div class="dw-literal">逐词直译：${esc(w.literal)}</div>`
+          : ''
+      }
+      ${
+        w.kind === 'phrase' && w.note
+          ? `<div class="dw-note">${esc(w.note)}</div>`
+          : ''
+      }
     </div>
+
+    ${wordsBlock}
 
     ${w.meanings && w.meanings.length ? `
     <div class="dw-sec">

@@ -473,9 +473,59 @@
           <div class="row">
             <div class="row-label">翻译引擎</div>
             <select class="select" id="engine">
-              <option value="google">Google</option>
-              <option value="mymemory">MyMemory</option>
+              <option value="google">Google（免费，快）</option>
+              <option value="mymemory">MyMemory（免费，额度小）</option>
+              <option value="llm">大模型（更准，需配置）</option>
             </select>
+          </div>
+        </div>
+      </div>
+
+      <div class="group" id="llmGroup" style="display: none">
+        <div class="row" style="padding-bottom: 4px">
+          <div class="row-label">大模型配置</div>
+        </div>
+        <div class="row">
+          <div class="row-label">
+            API 地址
+            <div class="row-hint">OpenAI 兼容，如 https://api.xxx.com/v1</div>
+          </div>
+        </div>
+        <div class="row" style="padding-top: 0">
+          <input class="input" id="llmBaseUrl" placeholder="https://…/v1" />
+        </div>
+        <div class="row">
+          <div class="row-label">API Key</div>
+        </div>
+        <div class="row" style="padding-top: 0">
+          <input class="input" id="llmApiKey" type="password" placeholder="sk-…" />
+        </div>
+        <div class="row">
+          <div class="row-label">
+            模型
+            <div class="row-hint" id="llmHint">先填地址，再拉取模型列表</div>
+          </div>
+          <select class="select" id="llmModel">
+            <option value="">（未选择）</option>
+          </select>
+        </div>
+        <div class="row" style="padding-top: 0">
+          <button class="btn btn-ghost" id="llmFetch" style="flex: 1">拉取模型列表</button>
+          <button class="btn btn-primary" id="llmTest" style="flex: 1">测试连接</button>
+        </div>
+        <div class="row">
+          <div class="row-label">
+            批量大小
+            <div class="row-hint">每次请求翻多少句，太大易超时</div>
+          </div>
+          <span class="val" id="llmBatchVal">12</span>
+        </div>
+        <div class="row" style="padding-top: 0">
+          <input type="range" id="llmBatch" min="4" max="40" step="1" />
+        </div>
+        <div class="row">
+          <div class="note" style="margin: 0; padding: 0">
+            密钥以明文存在本机浏览器存储里，不会上传到别处。走的是你自己填的地址。
           </div>
         </div>
       </div>

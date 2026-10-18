@@ -16,6 +16,7 @@
     "https://api.mymemory.translated.net/*",
     "https://api.dictionaryapi.dev/*"
   ],
+  "optional_host_permissions": ["https://*/*", "http://*/*"],
   "background": {
     "service_worker": "bg.js",
     "type": "module"

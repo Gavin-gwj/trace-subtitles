@@ -89,6 +89,23 @@ async function loadSettings() {
   $('positionVal').textContent = (s.position ?? 18) + '%';
   $('clickWord').checked = s.clickWord !== false;
   $('globalMode').checked = s.globalMode === true;
+
+  // 大模型配置
+  $('llmBaseUrl').value = s.llmBaseUrl || '';
+  $('llmApiKey').value = s.llmApiKey || '';
+  $('llmBatch').value = s.llmBatch ?? 12;
+  $('llmBatchVal').textContent = s.llmBatch ?? 12;
+  if (s.llmModel) {
+    // 已保存的模型先塞一个 option，否则下拉框会显示成空
+    $('llmModel').innerHTML = `<option value="${s.llmModel}">${s.llmModel}</option>`;
+    $('llmModel').value = s.llmModel;
+  }
+  syncLlmGroup();
+}
+
+/** 只有选中「大模型」引擎时才展开配置区，避免平时占着一大块 */
+function syncLlmGroup() {
+  $('llmGroup').style.display = $('engine').value === 'llm' ? '' : 'none';
 }
 
 async function saveSettings(patch, retranslate = false) {
@@ -134,6 +151,76 @@ function initSettingsUI() {
   });
   bindSetting('clickWord', 'clickWord');
   bindSetting('globalMode', 'globalMode');
+
+  // 大模型配置：这几个字段不触发重译（改配置时不该把正在看的字幕清空），
+  // 只落盘；下次切引擎或换语言时自然生效。
+  for (const id of ['llmBaseUrl', 'llmApiKey']) {
+    $(id).addEventListener('change', () => saveSettings({ [id]: $(id).value.trim() }));
+  }
+  $('llmModel').addEventListener('change', () => saveSettings({ llmModel: $('llmModel').value }));
+  $('llmBatch').addEventListener('change', () =>
+    saveSettings({ llmBatch: Number($('llmBatch').value) })
+  );
+  $('llmBatch').addEventListener('input', () => {
+    $('llmBatchVal').textContent = $('llmBatch').value;
+  });
+  // 引擎切换时展开/收起配置区
+  $('engine').addEventListener('change', syncLlmGroup);
+
+  // 拉取模型列表：地址/密钥填好后点一下，省得手打模型名
+  $('llmFetch').addEventListener('click', async (ev) => {
+    ev.preventDefault();
+    const btn = $('llmFetch');
+    btn.disabled = true;
+    btn.textContent = '拉取中…';
+    // 先把当前输入落盘，后台读的是存储里的值
+    await saveSettings({
+      llmBaseUrl: $('llmBaseUrl').value.trim(),
+      llmApiKey: $('llmApiKey').value.trim(),
+    });
+    try {
+      const r = await chrome.runtime.sendMessage({ type: 'llm:models' });
+      if (r && r.ok && Array.isArray(r.data) && r.data.length) {
+        const cur = $('llmModel').value;
+        $('llmModel').innerHTML = r.data
+          .map((m) => `<option value="${m}">${m}</option>`)
+          .join('');
+        if (r.data.includes(cur)) $('llmModel').value = cur;
+        $('llmHint').textContent = `共 ${r.data.length} 个模型，选一个即可`;
+      } else {
+        $('llmHint').textContent = (r && r.error) || '没拉到模型，检查地址与密钥';
+      }
+    } catch (e) {
+      $('llmHint').textContent = '拉取失败：' + (e.message || e);
+    }
+    btn.disabled = false;
+    btn.textContent = '拉取模型列表';
+  });
+
+  // 测试连接：真发一条最小请求，验证地址/密钥/模型三者都对
+  $('llmTest').addEventListener('click', async (ev) => {
+    ev.preventDefault();
+    const btn = $('llmTest');
+    btn.disabled = true;
+    btn.textContent = '测试中…';
+    await saveSettings({
+      llmBaseUrl: $('llmBaseUrl').value.trim(),
+      llmApiKey: $('llmApiKey').value.trim(),
+      llmModel: $('llmModel').value,
+    });
+    try {
+      const r = await chrome.runtime.sendMessage({ type: 'llm:test' });
+      if (r && r.ok) {
+        $('llmHint').textContent = `连接正常（${r.data.ms}ms）：${r.data.sample}`;
+      } else {
+        $('llmHint').textContent = '连接失败：' + ((r && r.error) || '未知错误');
+      }
+    } catch (e) {
+      $('llmHint').textContent = '连接失败：' + (e.message || e);
+    }
+    btn.disabled = false;
+    btn.textContent = '测试连接';
+  });
 
   // 拖动过字幕框后回到「底部居中」预设位置
   $('resetPos').addEventListener('click', async (ev) => {

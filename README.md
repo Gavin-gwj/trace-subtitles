@@ -353,7 +353,7 @@ store），同一个视频二次打开不再请求网络。
 - **退化路径**：若引擎把哨兵全吃掉（例如 MyMemory），`usable` 判定失败 → 退回纯译文，
   中文不高亮但至少能读，不会显示乱码。
 
-### 过程中修掉的十六个真实 bug（值得记录）
+### 过程中修掉的十七个真实 bug（值得记录）
 
 **bug 1：跨消息传函数。** `content.js` 曾把 `hash: S.hash` 放进 `chrome.runtime.sendMessage`，
 而消息经过结构化克隆会丢掉函数，SW 侧抛 `TypeError: hashFn is not a function`。
@@ -924,6 +924,20 @@ function frameVisibility() {
 挪到哪儿都可能又压住别的东西。三个细节（不透明度必须为 0 不能留残影 / 必须跳过
 YouTube 自己隐藏的控制栏 / 不重叠时不能触发）与 7 项断言见
 [让路：字幕压住 YouTube 设置菜单时自动退开](#让路字幕压住-youtube-设置菜单时自动退开)。
+
+**bug 15：短语卡比单词卡高一截，`positionPopup()` 直接压住字幕。**
+
+短语卡 375px 高、单词卡约 250px，而 `positionPopup()` 只按「词的上面」摆、
+只在放不下时才做一次避让。结果短语卡正好盖住字幕条 —— 而**当时的测试一条位置断言都没有**，
+只检查卡片里的文字，靠人眼看截图才发现。
+
+修复：先量字幕框上下各剩多少空间，放得下就完全不碰字幕，放不下才把卡片高度收到刚好不越界
+（`body.style.maxHeight = Math.min(hardMax, availH)`）；并补上 `L10b`（不遮挡）与
+`L10c`（在视口内）两条断言。
+
+这个修复本身又引出一个 bug：把 `!boxRect` 兜底分支从函数末尾提到判断链最前面时，
+忘了删掉末尾那行重复的兜底赋值 —— 于是 `boxRect` 为 null 时仍然执行 `boxRect.top`，
+`TypeError` 让整个卡片不渲染，`L7`–`L10c` 全部 FAIL。**移动分支要连带删掉旧位置那份。**
 
 ### 词形归一化：收藏 beverage，也要高亮 beverages
 
@@ -1503,6 +1517,127 @@ D8 的 `cjkRatio:0.65` 与 `cjkRatioAll:0.34` 之差就是折叠英文释义的�
 
 ---
 
+### 短语划词：选中 `pay your fair`，别给我「支付你的公平的」
+
+**需求**：选中多个词（短语/习语）时给整段释义，并且能作为「短语」条目进生词本；
+选中其中单个词仍走原来的单词卡。
+
+**核心矛盾**：免费机器翻译对习语基本无能为力。实测结论：
+
+| 短语 | Google 整体译文 | 逐词拼接 | 是否可用 |
+|---|---|---|---|
+| pay your fair | 支付你的公平 | 支付你的公平的 | ✗ 逐词拼接 |
+| walk up | 走上来 | 走上来 | ✗ |
+| put on | 穿上 | 穿上 | ✓ 恰好对 |
+| give up | 放弃 | 放弃 | ✓ |
+| look forward to | 期待 | 期待 | ✓ |
+| take care of | 照顾 | 照顾 | ✓ |
+
+十二组里约一半习语恰好被词典收录所以正确，另一半纯逐词拼接。
+所以**不能承诺「短语一定译对」**，能做的是：译不准时明确告诉用户。
+
+**三级降级（`bg.js` 的 `lookupPhrase()`）**：
+
+1. **Tier A — 大模型**（配置了 LLM 才走）：把整句上下文 + 选中短语一起送过去，
+   要求返回「短语在此句中的意思 + 逐词对照 + 是否可能是字幕误听」。
+   这是唯一能真正理解习语的路径。
+2. **Tier B — Google 短语整体翻译**：一次请求整段，比逐词好但常常还是拼接。
+3. **Tier C — 逐词直译**：前两级都失败时兜底。
+
+**`looksLiteral()` —— 判断「整段译文是不是逐词拼的」**
+
+第一版用严格相等比较，永远不触发：
+```
+整体译文：支付你的公平
+逐词拼接：支付你的公平的     ← fair 作形容词多一个「的」
+```
+严格比较不等，警示就永不出现 —— 而那正是最该提示的情况。改成先去掉虚词助词标点再比：
+
+```js
+function looksLiteral(whole, literal) {
+  const norm = (s) =>
+    String(s || '')
+      .replace(/[\s\u3000]/g, '')
+      // 中文虚词/助词/量词：它们最容易在两种翻法里增减，不构成"意思不同"
+      .replace(/[的了着过地得吗呢吧啊呀哦嘛]/g, '')
+      .replace(/[，。、；：！？,.!?;:'"「」『』()（）]/g, '');
+  const a = norm(whole);
+  const b = norm(literal);
+  if (!a || !b) return false;
+  if (a === b) return true;
+  const [short, long] = a.length <= b.length ? [a, b] : [b, a];
+  return short.length >= 3 && long.includes(short) && long.length - short.length <= 4;
+}
+```
+
+**卡片设计：先警示，再降级显示**
+
+命中 `looksLiteral()` 时：
+- 顶部插入橙色警示条「这句是按词拼出来的，可能不是它在这里的真正意思」；
+- 释义从红色 19px 降级成灰色 15px（`.is-weak`）—— 它不配当主角。
+
+**整段高亮**：字幕里 `pay your fair` 三个词包在一个 `.trace-phrase` 里，
+点其中任何一个词都打开短语卡（不是单词卡）。判定靠 `data-p` 属性记短语原文。
+
+**生词本区分**：短语条目 `isPhrase: true`，看板侧栏与筛选行都有「短语」入口，
+行首用引号徽标 `❝` 而不是首字母圆形，来源标签显示「大模型」或「机器翻译」。
+
+**短语卡的定位坑（测试没抓到，看截图才发现）**
+
+短语卡比单词卡高一大截（375px vs 250px），旧 `positionPopup()` 只按「词的上面」摆，
+结果直接压住字幕条。当时的测试只断言卡片内容，**没有任何一条断言卡片和字幕的位置关系**。
+修复：先算字幕框上下各剩多少空间，放得下就完全不碰字幕，放不下才收紧卡片高度
+（`body.style.maxHeight = Math.min(hardMax, availH)`）。同时补上断言：
+
+```
+✓ L10b 短语卡不遮挡字幕框 {"pop":[286,252,340,375],"box":[270,635,741,103],"overlapPx":-8}
+✓ L10c 短语卡在视口内    {"insideViewport":true,"bodyScrollable":false}
+```
+
+**修复过程中引入又修掉的 bug**：把 `!boxRect` 的兜底分支从函数末尾提到判断链最前面时，
+漏了同时删除末尾那行重复的兜底赋值，导致 `boxRect` 为 null 时仍然执行
+`boxRect.top` → `TypeError` → 整个卡片不渲染（L7–L10c 全 FAIL）。教训是
+**移动分支时要连带删掉旧位置的那份**。
+
+---
+
+### 大模型引擎：第三种翻译选择
+
+**动机**：Google 免费端点对习语、上下文、口语基本无解（见上表）。
+接一个 OpenAI 兼容的 `/chat/completions` 端点，让用户自己填 API，译文质量可以跨一个档次。
+
+**配置项（`DEFAULT_SETTINGS`）**：`llmBaseUrl` / `llmApiKey` / `llmModel` /
+`llmTemperature` / `llmUseForSubtitles`（是否也用于字幕批量翻译）。
+
+**`llmChat(messages, opts)`**：标准 `/chat/completions` POST，
+`Authorization: Bearer <key>`，返回 `choices[0].message.content`。
+
+**`llmTranslateAll(texts, source, target)`**：一次请求翻一批字幕，
+用编号前缀 `1. ... 2. ...` 保证行对齐，返回后按行号切回。
+失败（网络/配额/格式不符）时抛错，由 `translateBatch()` 捕获并**自动降级回 Google** ——
+大模型不可用不能导致整屏没译文。
+
+**`lookupPhrase()` 的 Tier A**：带上下文的一次性释义请求，要求返回结构化 JSON。
+实测（假模型）能拿到「付钱」而不是「支付你的公平」。
+
+**权限**：`llmBaseUrl` 可以是任意域名，无法在 `manifest.json` 里静态声明。
+用 `optional_host_permissions: ["<all_urls>"]` + 运行时 `chrome.permissions.request()`
+在用户保存配置时申请。测试里通过 `chrome.permissions.contains()` 验证过。
+
+**`test-phrase.js` 的三条大模型断言**（用 `ctx.route()` 伪造 `/chat/completions`）：
+
+```
+✓ L17 能拉取模型列表 {"ok":true,"data":["fake-1","fake-2"]}
+✓ L18 大模型引擎能翻出译文 ["现在就支付你的公平。","祝你今天过得愉快。"]
+✓ L19 请求里带了模型名与 system 提示 {"model":"fake-1","n":2}
+✓ L20 大模型失败时自动降级（仍有译文） {"hits":1,"out":["这里有一些全新的东西。"]}
+```
+
+L20 是这里最重要的一条：让伪造端点返回 500，断言仍有译文 ——
+证明降级链真的接上了，而不是"配了大模型就再也翻不出来"。
+
+---
+
 ## 三、安装与使用
 
 ### 加载扩展
@@ -1527,7 +1662,8 @@ D8 的 `cjkRatio:0.65` 与 `cjkRatioAll:0.34` 之差就是折叠英文释义的�
   让出点击，菜单关掉又恢复 —— 不会出现"想调清晰度却点不到"的情况
 - **显示模式**：双语 / 仅译文 / 仅原文
 - **目标语言**：简体中文、繁体中文、日、韩、英、法、德、西、俄、葡（10 种）
-- **翻译引擎**：Google（推荐，快）/ MyMemory（备用）
+- **翻译引擎**：Google（推荐，快）/ MyMemory（备用）/ 大模型（自带 OpenAI 兼容 API，
+  习语与上下文翻得明显更准；不可用时自动降级回 Google）
 - **字号、字幕位置**：popup 或**页内面板**里实时调
 - **毛玻璃字幕框**：深色半透明底 + `backdrop-filter: blur(18px)`，透出画面纹理而不是死黑板
 - **播放器右下角悬浮按钮**：一个渐变紫的「T」方块贴在播放器右下角内侧，点击弹出**页内设置面板**
@@ -1544,7 +1680,12 @@ D8 的 `cjkRatio:0.65` 与 `cjkRatioAll:0.34` 之差就是折叠英文释义的�
   移开鼠标后约 0.5s 淡出，绝不干扰画面；
   位置自动记住（只记纵向比例），换视频/刷新/全屏/改窗口大小都保持；
   面板或 popup 里「恢复居中」可回到默认底部位置
-- **点击查词**：点字幕里任意单词 → 音标 + 中文释义 + 英文释义 + 例句
+- **点击查词**：点字幕里任意单词 → 音标 + 中文词性 + 中文释义 + 本句译文 +
+  折叠的英文原文释义（默认收起，因为要的是中文）
+- **短语划词**：选中 `pay your fair` 这类多个词时，点其中任意一个词打开**短语卡** ——
+  整段释义 + 逐词对照 + 误听提示；整段在字幕里作为一个整体高亮。
+  机器翻译只是逐词拼接时会显式警示「这句是按词拼出来的」，而不是假装准确
+- **短语生词本**：短语作为独立条目收藏，看板里用引号徽标与「短语」分类区分，不与单词混在一起
 - **生词本**：一键加入，记录单词/释义/**所在句子与译文**/视频标题/时间点，可搜索、删除、
   导出 JSON，点击条目跳回原视频那一秒
 - **生词本落盘**：可指定本机任意文件夹作为备份目录，加词/删词/复习后自动覆盖写
@@ -1586,6 +1727,8 @@ node test-backup.js          # 生词本写本机文件 + 卸载重装后恢复 
 node test-global.js          # 全局显示悬浮条 + 离开画面自动隐藏 + 迷你播放器不贴小窗
 node test-dodge.js           # 字幕压住 YouTube 设置菜单时让路（淡出 + 点击穿透）
 node test-dict.js            # 查词卡片中文优先（词性中文 + 释义中文化 + 语境义）
+node test-phrase.js          # 短语整段释义 + 短语生词本 + 大模型引擎与降级
+node run-all.js              # 一次跑完以上全部，末尾输出 PASS/FAIL 汇总
 ```
 
 `tools/mock/` 用 Playwright `page.route()` 整体伪造 `https://www.youtube.com/**`，
@@ -1720,7 +1863,11 @@ D:\MyFiles\项目\Trace\
    ├─ test-global.js            全局显示悬浮条 + 离开画面隐藏 + 迷你播放器避让
    ├─ test-dodge.js             字幕压住设置菜单时让路（淡出 + 点击穿透）
 ├─ test-dict.js              查词卡片中文优先（词性中文 + 释义中文化 + 语境义）
+├─ test-phrase.js            短语整段释义 + 短语生词本 + 大模型引擎与降级
+├─ run-all.js                一次跑完全部回归，输出汇总表
 ├─ shot-dict.png             查词卡片：本句译作「立即」与单词直译「立即地」并存
+├─ shot-phrase.png           短语卡：警示条 + 降级释义 + 逐词对照
+├─ shot-phrase-board.png     词库看板的短语视图与短语抽屉
    ├─ probe-ext2\               主世界 vs 隔离世界对照实验
    ├─ probe-transcript.js       get_transcript 接口探针
    ├─ gen-icons.js              纯 Node 生成 PNG 图标

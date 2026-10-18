@@ -272,6 +272,34 @@
 }
 
 /*
+ * 已收藏的短语：整段连续多词包在一个 .trace-phrase 里。
+ *
+ * 和单词的视觉区分靠"形状"而不是"另一种颜色"：
+ *   单词 = 每个词各自一小块黄底 + 实下划线（碎块感）
+ *   短语 = 整段一条连续的淡黄底 + 上下两条细边（连贯感）
+ * 如果短语也用同样的逐词黄底，用户根本看不出"这三个词是一个整体"。
+ * 内部仍保留 .trace-word，所以每个词单独悬停有反馈，点击拿整段。
+ */
+#trace-sub-overlay .trace-phrase {
+  background: rgba(255, 200, 60, .13);
+  box-shadow: inset 0 1px 0 rgba(255, 200, 60, .55),
+    inset 0 -1px 0 rgba(255, 200, 60, .55);
+  border-radius: 4px;
+  padding: 1px 2px;
+  cursor: pointer;
+}
+#trace-sub-overlay .trace-phrase:hover {
+  background: rgba(255, 200, 60, .22);
+}
+/* 短语内部的词不再叠自己的底色，否则一层套一层显得脏 */
+#trace-sub-overlay .trace-phrase .trace-word.trace-saved,
+#trace-sub-overlay .trace-phrase .trace-word.trace-in-phrase {
+  background: none;
+  box-shadow: none;
+  color: #ffe08a;
+}
+
+/*
  * 译文里对应生词的那段中文。
  *
  * 和英文侧刻意做成"同色系、不同形状"：
@@ -325,18 +353,27 @@
   padding: 12px 14px 6px;
 }
 #trace-word-popup .trace-pop-word {
-  font-size: 19px;
+  font-size: 17px;
   font-weight: 700;
   color: #111;
+  letter-spacing: -0.01em;
 }
 #trace-word-popup .trace-pop-close {
   border: none;
   background: transparent;
-  font-size: 20px;
+  font-size: 22px;
   line-height: 1;
-  color: #999;
+  /* 关闭按钮原来 #999 20px，白底上偏淡、点击目标也小，
+     用户第一眼找不到怎么关掉卡片 */
+  color: #6a6a6a;
   cursor: pointer;
-  padding: 0 2px;
+  padding: 2px 6px;
+  margin: -2px -4px 0 0;
+  border-radius: 6px;
+}
+#trace-word-popup .trace-pop-close:hover {
+  color: #111;
+  background: #f0f0f0;
 }
 #trace-word-popup .trace-pop-close:hover {
   color: #333;
@@ -451,10 +488,100 @@
   margin-top: 3px;
 }
 
+/* ---------------------------------------------------------- 短语卡片 */
+
+/* 短语整段释义：这是卡片的唯一主角，字号比单词卡更大 */
+#trace-word-popup .trace-pop-phrase-gloss {
+  font-size: 19px;
+  line-height: 1.35;
+  font-weight: 600;
+  color: #b3261e;
+  margin: 2px 0 6px;
+  word-break: break-word;
+}
+/* 逐词拼出来的译文：降级成灰色、去掉红色强调，
+   因为它不是"这个短语的意思"，只是"这些词各自的意思拼起来" */
+#trace-word-popup .trace-pop-phrase-gloss.is-weak {
+  font-size: 15px;
+  font-weight: 500;
+  color: #8a8a8a;
+}
+
+/* 警示条：放在释义上方，先让用户知道这条不可靠 */
+#trace-word-popup .trace-pop-phrase-warn {
+  font-size: 12px;
+  line-height: 1.5;
+  color: #8a3b00;
+  background: #fff4e5;
+  border-left: 3px solid #f0a040;
+  padding: 5px 8px;
+  border-radius: 0 4px 4px 0;
+  margin-bottom: 7px;
+}
+
+/* 来源标注：让用户知道这条释义有多可信。
+   大模型 > 机器翻译 > 逐词直译，颜色依次变淡，越淡越该存疑。 */
+#trace-word-popup .trace-pop-src {
+  display: inline-block;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: .03em;
+  padding: 1px 7px;
+  border-radius: 9px;
+  margin-bottom: 6px;
+}
+#trace-word-popup .trace-pop-src-llm {
+  color: #14532d;
+  background: #dcfce7;
+}
+#trace-word-popup .trace-pop-src-google {
+  color: #1e40af;
+  background: #e0e7ff;
+}
+#trace-word-popup .trace-pop-src-literal {
+  color: #92400e;
+  background: #fef3c7;
+}
+
+/* 说明（比如"字幕里 fair 可能是 fare 的误听"）：次要信息，小字斜体 */
+#trace-word-popup .trace-pop-phrase-note {
+  font-size: 12px;
+  line-height: 1.5;
+  color: #8a6d3b;
+  background: #fdf8ec;
+  border-left: 3px solid #e8c97a;
+  padding: 5px 8px;
+  border-radius: 0 4px 4px 0;
+  margin-bottom: 8px;
+}
+
+/* 逐词对照：两列，左边原词右边中文，扫一眼就知道每个词各是什么 */
+#trace-word-popup .trace-pop-words {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+#trace-word-popup .trace-pop-words li {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+  padding: 2px 0;
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+#trace-word-popup .trace-pop-words b {
+  flex: none;
+  min-width: 82px;
+  color: #555;
+  font-weight: 600;
+}
+#trace-word-popup .trace-pop-words span {
+  color: #1a1a1a;
+}
+
 /* 英文释义默认收起 —— 用户要看的是中文 */
 #trace-word-popup .trace-pop-more {
-  margin-top: 12px;
-  padding-top: 9px;
+  margin-top: 12px;  padding-top: 9px;
   border-top: 1px solid #f0f0f0;
 }
 #trace-word-popup .trace-pop-more summary {

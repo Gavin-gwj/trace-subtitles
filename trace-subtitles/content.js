@@ -68,6 +68,10 @@
     wordPopup: null,
     /** 已加入生词本的单词（小写），用于全站高亮 */
     wordSet: new Set(),
+    /** 已加入生词本的短语（归一化文本），用于连续多词高亮 */
+    phraseSet: [],
+    /** 用户最近一次选中的文本（用于判断"选的是短语还是单词"） */
+    lastSelection: '',
     /** 上一轮翻译实际使用的目标语言（设置晚到时用来判断是否需要重翻） */
     translatedTarget: '',
   };
@@ -238,6 +242,7 @@
           <select data-k="engine">
             <option value="google">Google</option>
             <option value="mymemory">MyMemory</option>
+            <option value="llm">大模型</option>
           </select>
         </div>
 
@@ -971,30 +976,93 @@
     return found.size ? found : null;
   }
 
+  /** 归一化短语文本：与 bg.js 的 normPhrase 保持同一规则 */
+  function normPhrase(s) {
+    return String(s || '')
+      .replace(/[\u2018\u2019]/g, "'")
+      .replace(/[\u201C\u201D]/g, '"')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, '')
+      .toLowerCase();
+  }
+
   /** 把原文拆成可点击的单词 span，保留标点；已加入生词本的单词额外加 trace-saved */
   function renderWords(text) {
-    return text
-      .split(/(\s+)/)
-      .map((tok) => {
-        if (!tok.trim()) return tok;
-        const m = tok.match(/^([^\p{L}\p{N}']*)([\p{L}\p{N}'-]+)([^\p{L}\p{N}']*)$/u);
-        if (!m) return escapeHtml(tok);
-        const [, pre, word, post] = m;
-        // 命中生词本（含词形变化）时，data-w 记**生词本里的那个词**，
-        // 这样点 beverages 打开的是 beverage 的词卡，按钮显示「✓ 已在生词本」。
-        const canon = findSaved(word);
-        const saved = !!canon;
-        return (
-          escapeHtml(pre) +
-          `<span class="trace-word${saved ? ' trace-saved' : ''}" data-w="${escapeAttr(
-            canon || word
-          )}">` +
-          escapeHtml(word) +
-          '</span>' +
-          escapeHtml(post)
-        );
-      })
-      .join('');
+    const toks = text.split(/(\s+)/);
+    // 第一遍：切成结构化的片段，同时给每个"词"编号。
+    // 短语高亮要跨多个 token，先有稳定的词序号才能标记区间。
+    const parts = toks.map((tok) => {
+      if (!tok.trim()) return { kind: 'ws', text: tok };
+      const m = tok.match(/^([^\p{L}\p{N}']*)([\p{L}\p{N}'-]+)([^\p{L}\p{N}']*)$/u);
+      if (!m) return { kind: 'raw', text: tok };
+      const [, pre, word, post] = m;
+      // 命中生词本（含词形变化）时，data-w 记**生词本里的那个词**，
+      // 这样点 beverages 打开的是 beverage 的词卡，按钮显示「✓ 已在生词本」。
+      const canon = findSaved(word);
+      return { kind: 'word', pre, word, post, canon, saved: !!canon };
+    });
+
+    // 第二遍：把连续词序列拿出来做短语匹配。
+    // 长短语优先，避免 "pay your fair" 被更短的短语抢先切碎。
+    const seq = []; // { partIdx, key }
+    parts.forEach((p, i) => {
+      if (p.kind === 'word') seq.push({ partIdx: i, key: normPhrase(p.word) });
+    });
+    const cover = new Array(parts.length).fill(null); // partIdx -> {start:boolean,end:boolean,phrase}
+    if (state.phraseSet && state.phraseSet.length && seq.length) {
+      const phrases = [...state.phraseSet].sort(
+        (a, b) => b.split(' ').length - a.split(' ').length
+      );
+      const used = new Array(seq.length).fill(false);
+      for (const ph of phrases) {
+        const want = ph.split(' ').filter(Boolean);
+        if (!want.length) continue;
+        for (let i = 0; i + want.length <= seq.length; i++) {
+          if (used[i]) continue;
+          let ok = true;
+          for (let k = 0; k < want.length; k++) {
+            if (used[i + k] || seq[i + k].key !== want[k]) { ok = false; break; }
+          }
+          if (!ok) continue;
+          for (let k = 0; k < want.length; k++) used[i + k] = true;
+          cover[seq[i].partIdx] = { start: true, phrase: ph };
+          cover[seq[i + want.length - 1].partIdx] = { end: true, phrase: ph };
+          // 中间那些词单独包一层，保证整段连续可点击
+          for (let k = 1; k < want.length - 1; k++) {
+            cover[seq[i + k].partIdx] = { mid: true, phrase: ph };
+          }
+        }
+      }
+    }
+
+    // 第三遍：输出。短语区间用 .trace-phrase 包裹，内部仍是可点的 .trace-word，
+    // 这样点短语里任意一个词都能拿到整段（由 onWordClick 判断用哪条路径）。
+    let out = '';
+    let openPhrase = null;
+    parts.forEach((p, i) => {
+      if (p.kind !== 'word') { out += escapeHtml(p.text); return; }
+      const c = cover[i];
+      if (c && c.start) {
+        openPhrase = c.phrase;
+        out += `<span class="trace-phrase trace-saved" data-p="${escapeAttr(c.phrase)}">`;
+      }
+      const cls =
+        'trace-word' + (p.saved ? ' trace-saved' : '') + (openPhrase ? ' trace-in-phrase' : '');
+      out +=
+        escapeHtml(p.pre) +
+        `<span class="${cls}" data-w="${escapeAttr(p.canon || p.word)}"` +
+        (openPhrase ? ` data-p="${escapeAttr(openPhrase)}"` : '') +
+        '>' +
+        escapeHtml(p.word) +
+        '</span>' +
+        escapeHtml(p.post);
+      if (c && c.end) {
+        out += '</span>';
+        openPhrase = null;
+      }
+    });
+    return out;
   }
 
   function escapeHtml(s) {
@@ -1336,29 +1404,42 @@
         if (!d) return;
         btn.disabled = true;
         btn.textContent = '添加中…';
+        const isPhrase = d.kind === 'phrase';
         try {
           const r = await chrome.runtime.sendMessage({
             type: 'word:add',
             payload: {
               word: d.word,
+              kind: isPhrase ? 'phrase' : 'word',
               phonetic: d.phonetic,
-              zh: d.zh,
+              // 短语没有词典直译，把整段释义存进 zh，词库列表才有东西可显示
+              zh: isPhrase ? d.gloss : d.zh,
               meanings: d.meanings,
               example: d.example,
               context: d.context,
               contextZh: d.contextZh,
+              // 短语专有字段
+              literal: isPhrase ? d.literal : undefined,
+              source: isPhrase ? d.source : undefined,
+              note: isPhrase ? d.note : undefined,
+              words: isPhrase ? d.words : undefined,
               videoTitle: document.title.replace(/ - YouTube$/, ''),
               videoId: state.videoId,
               time: getVideo()?.currentTime ?? null,
             },
           });
           if (r && r.ok) {
-            btn.textContent = '✓ 已在生词本';
+            btn.textContent = isPhrase ? '✓ 短语已在生词本' : '✓ 已在生词本';
             btn.classList.add('trace-done');
             btn.disabled = true;
             btn.dataset.act = 'remove';
-            // 立刻本地生效：高亮当前字幕里所有该词，无需等广播
-            state.wordSet.add(String(d.word || '').toLowerCase());
+            // 立刻本地生效：高亮当前字幕里所有该词/该短语，无需等广播
+            if (isPhrase) {
+              const k = normPhrase(d.word);
+              if (k && !state.phraseSet.includes(k)) state.phraseSet.push(k);
+            } else {
+              state.wordSet.add(String(d.word || '').toLowerCase());
+            }
             refreshActiveWords();
           } else {
             btn.textContent = '添加失败';
@@ -1372,21 +1453,152 @@
         if (!d) return;
         btn.disabled = true;
         btn.textContent = '移除中…';
+        const isPhrase = d.kind === 'phrase';
         try {
           await chrome.runtime.sendMessage({ type: 'word:remove', word: d.word });
-          btn.textContent = '＋ 加入生词本';
+          btn.textContent = isPhrase ? '＋ 收藏这个短语' : '＋ 加入生词本';
           btn.classList.remove('trace-done');
           btn.disabled = false;
           btn.dataset.act = 'add';
-          state.wordSet.delete(String(d.word || '').toLowerCase());
+          if (isPhrase) {
+            const k = normPhrase(d.word);
+            state.phraseSet = state.phraseSet.filter((x) => x !== k);
+          } else {
+            state.wordSet.delete(String(d.word || '').toLowerCase());
+          }
           refreshActiveWords();
         } catch (e) {
-          btn.textContent = '✓ 已在生词本';
+          btn.textContent = isPhrase ? '✓ 短语已在生词本' : '✓ 已在生词本';
           btn.disabled = false;
         }
       }
     });
     return popupEl;
+  }
+
+  // ------------------------------------------------------------ 查短语
+  //
+  // 单词和短语走两条不同的卡片：单词有词典（音标/词性/多义项），
+  // 短语没有词典条目，只能靠整段释义 + 逐词对照。混成一张卡片会让
+  // 「pay your fair」这种习语被拆成三个独立词义，等于没解释。
+
+  /** 短语卡片：整段释义（大模型优先）+ 逐词对照 + 本句译文 */
+  async function showPhraseCard(phrase, el) {
+    const rect = el.getBoundingClientRect();
+    const pop = ensurePopup();
+    const norm = normPhrase(phrase);
+    const ctx = state.active?.text || '';
+    const ctxZh = state.active?.zh || '';
+
+    state.wordPopup = {
+      word: norm,
+      kind: 'phrase',
+      saved: false,
+      context: ctx,
+      contextZh: ctxZh,
+    };
+
+    pop.innerHTML = `
+      <div class="trace-pop-head">
+        <span class="trace-pop-word">${escapeHtml(norm)}</span>
+        <button class="trace-pop-close" data-act="close" title="关闭">×</button>
+      </div>
+      <div class="trace-pop-body"><div class="trace-pop-loading">查询中…</div></div>`;
+    pop.classList.remove('trace-hidden');
+    positionPopup(pop, rect);
+
+    const savedTask = chrome.runtime
+      .sendMessage({ type: 'word:has', word: norm })
+      .then((r) => (r && r.ok ? !!r.data : false))
+      .catch(() => false);
+
+    let p = null;
+    try {
+      const r = await chrome.runtime.sendMessage({
+        type: 'phrase',
+        phrase: norm,
+        context: ctx,
+        contextZh: ctxZh,
+      });
+      if (r && r.ok) p = r.data;
+    } catch (_) {}
+
+    const saved = await savedTask;
+    if (state.wordPopup) state.wordPopup.saved = saved;
+    if (saved) {
+      if (!state.phraseSet.includes(norm)) state.phraseSet.push(norm);
+    } else {
+      state.phraseSet = state.phraseSet.filter((x) => x !== norm);
+    }
+
+    if (!p) {
+      pop.querySelector('.trace-pop-body').innerHTML =
+        '<div class="trace-pop-loading">没能查到这段的释义</div>';
+      return;
+    }
+
+    state.wordPopup = { ...state.wordPopup, ...p, saved };
+
+    // 来源标注：让用户知道这条释义有多可信。大模型能处理习语和同音误听，
+    // Google 对习语常常逐词直译，逐词兜底就只是拼接，可信度依次递减。
+    const SRC = {
+      llm: { text: '大模型释义', cls: 'trace-pop-src-llm' },
+      google: { text: '机器翻译', cls: 'trace-pop-src-google' },
+      literal: { text: '逐词直译', cls: 'trace-pop-src-literal' },
+    };
+    const src = SRC[p.source] || SRC.literal;
+
+    const wordsHtml = (p.words || [])
+      .filter((w) => w && w.w)
+      .map(
+        (w) =>
+          `<li><b>${escapeHtml(w.w)}</b><span>${escapeHtml(w.zh || '—')}</span></li>`
+      )
+      .join('');
+
+    pop.querySelector('.trace-pop-body').innerHTML = `
+      ${
+        // 逐词拼出来的译文不能当权威答案摆在最上面 —— 用户上次抱怨的
+        // 「翻译不一样」就是这么来的：习语被拆成词义，看着像翻错了。
+        // 所以这种情况先给警示，再把字面译文降级显示。
+        p.note && /按词拼|字面/.test(p.note)
+          ? `<div class="trace-pop-phrase-warn">${escapeHtml(p.note)}</div>`
+          : ''
+      }
+      <div class="trace-pop-phrase-gloss${
+        p.note && /按词拼|字面/.test(p.note) ? ' is-weak' : ''
+      }">${escapeHtml(p.gloss || '')}</div>
+      <div class="trace-pop-src ${src.cls}">${src.text}</div>
+      ${
+        p.note && !/按词拼|字面/.test(p.note)
+          ? `<div class="trace-pop-phrase-note">${escapeHtml(p.note)}</div>`
+          : ''
+      }
+      ${
+        wordsHtml
+          ? `<div class="trace-pop-block">
+              <div class="trace-pop-label">逐词对照</div>
+              <ul class="trace-pop-words">${wordsHtml}</ul>
+            </div>`
+          : ''
+      }
+      ${
+        ctx
+          ? `<div class="trace-pop-block">
+              <div class="trace-pop-label">本句译文</div>
+              <div class="trace-pop-ctx">${escapeHtml(ctx)}</div>
+              ${ctxZh ? `<div class="trace-pop-ctx-zh">${escapeHtml(ctxZh)}</div>` : ''}
+            </div>`
+          : ''
+      }
+      <div class="trace-pop-actions">
+        ${
+          saved
+            ? '<button class="trace-pop-add trace-done" data-act="remove">✓ 短语已在生词本</button>'
+            : '<button class="trace-pop-add" data-act="add">＋ 收藏这个短语</button>'
+        }
+      </div>`;
+    positionPopup(pop, rect);
   }
 
   async function onWordClick(ev) {
@@ -1395,6 +1607,14 @@
     // 两者都带 data-w = 英文原词，所以打开的是同一张生词卡。
     const el = ev.target.closest('.trace-word, .trace-saved-zh');
     if (!el) return;
+
+    // 短语分支：点在 .trace-phrase 内部的词上时，优先按整段短语释义。
+    // 判断依据是渲染时挂上的 data-p（短语归一化文本）。
+    const phrase = el.dataset.p || '';
+    if (phrase && phrase.includes(' ')) {
+      return showPhraseCard(phrase, el);
+    }
+
     const word = el.dataset.w;
     if (!word) return;
 
@@ -1561,27 +1781,52 @@
     pop.style.width = w + 'px';
     pop.style.left = left + 'px';
 
-    // 先放到 0 处测量真实高度
-    pop.style.top = '0px';
-    // 卡片变高后可能超出视口，给它一个上限（内容多时内部滚动）
-    const maxH = Math.round(window.innerHeight * 0.62);
-    pop.querySelector('.trace-pop-body').style.maxHeight = maxH + 'px';
-    const h = pop.offsetHeight || 200;
+    const body = pop.querySelector('.trace-pop-body');
+    // 卡片最高不超过视口的 62%，否则会挤满整屏
+    const hardMax = Math.round(window.innerHeight * 0.62);
 
-    // 优先放在单词上方；但要避开整块字幕区域，别把正在看的字幕挡住
+    // 先放到 0 处测量真实高度（此时用硬上限，量出来的就是"想占多高"）
+    pop.style.top = '0px';
+    body.style.maxHeight = hardMax + 'px';
+    const natural = pop.offsetHeight || 200;
+
+    // 字幕框的位置决定了卡片能往哪儿放。短语卡比单词卡高一截，
+    // 只按"单词上方"摆会直接压住字幕 —— 所以这里先算清上下各剩多少空间，
+    // 放得下就完全不碰字幕，放不下才收紧高度。
     const box = overlayEl ? overlayEl.querySelector('.trace-sub-box') : null;
     const boxRect = box ? box.getBoundingClientRect() : null;
-    let top = rect.top - h - 12;
-    if (boxRect && top + h > boxRect.top - 8) {
-      // 会被字幕挡住 → 整体移到字幕块上方
-      top = boxRect.top - h - 8;
+    const gap = 8;
+    const aboveSpace = boxRect ? Math.round(boxRect.top - gap - pad) : window.innerHeight - pad * 2;
+    const belowSpace = boxRect
+      ? Math.round(window.innerHeight - pad - (boxRect.bottom + gap))
+      : 0;
+
+    let top;
+    let availH;
+    if (!boxRect) {
+      // 没有字幕框（字幕被关掉 / 还没渲染）：按"词的上面"摆即可
+      top = Math.max(pad, rect.top - natural - 12);
+      availH = hardMax;
+    } else if (aboveSpace >= natural) {
+      // 上方完全放得下：最理想，卡片和字幕互不干扰
+      top = boxRect.top - gap - natural;
+      availH = hardMax;
+    } else if (belowSpace >= natural) {
+      top = boxRect.bottom + gap;
+      availH = hardMax;
+    // 两边都放不下：占空间大的那一边，并把卡片高度收到刚好不碰字幕。
+    // 再额外留 6px 呼吸感 —— 只留 8px gap 时截图看着"贴上去了"。
+    } else if (aboveSpace >= belowSpace) {
+      top = pad;
+      availH = Math.max(140, aboveSpace - 6);
+    } else {
+      top = boxRect.bottom + gap;
+      availH = Math.max(140, belowSpace - 6);
     }
-    // 上方放不下 → 放到字幕块下方；再不行就贴顶
-    if (top < pad) {
-      const below = boxRect ? boxRect.bottom + 8 : rect.bottom + 12;
-      top = below + h <= window.innerHeight - pad ? below : pad;
-    }
+
+    top = Math.max(pad, Math.min(top, window.innerHeight - pad - 120));
     pop.style.top = Math.round(top) + 'px';
+    body.style.maxHeight = Math.min(hardMax, availH) + 'px';
   }
 
   function hidePopup() {
@@ -1641,8 +1886,13 @@
       const r = await chrome.runtime.sendMessage({ type: 'word:keys' });
       if (r && r.ok && Array.isArray(r.data)) {
         state.wordSet = new Set(r.data.map((w) => String(w).toLowerCase()));
-        refreshActiveWords();
       }
+      // 短语单独拉：它们的匹配方式不同（跨词连续），不能混进 wordSet
+      const rp = await chrome.runtime.sendMessage({ type: 'word:phrase-keys' });
+      if (rp && rp.ok && Array.isArray(rp.data)) {
+        state.phraseSet = rp.data.map((p) => String(p).toLowerCase()).filter(Boolean);
+      }
+      refreshActiveWords();
     } catch (_) {
       /* 忽略：高亮是增强功能，失败不影响字幕 */
     }
