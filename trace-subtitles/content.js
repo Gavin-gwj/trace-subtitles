@@ -1403,11 +1403,19 @@
     // data-w 在渲染时已归一化成生词本里的那个词（点 beverages 拿到 beverage），
     // 但历史渲染结果或手动构造的节点可能还是原始词形，这里再归一化一次兜底。
     const canon = findSaved(word) || word;
+    // 生词在译文里被高亮时，后台同时给了它在那句话里的译法（zhSpans）。
+    // 这是「这个词在这句里到底译成什么」最权威的答案 —— 词典给的是通用义，
+    // 常常和语境义不一致（vintage 词典「优质的」/ 本句「复古」），用户会以为翻错了。
+    const spanZh =
+      (state.active?.zhSpans || []).find(
+        (s) => String(s?.word || '').toLowerCase() === String(canon).toLowerCase()
+      )?.zh || '';
     state.wordPopup = {
       word: canon,
       saved: !!findSaved(word),
       context: state.active?.text || '',
       contextZh: state.active?.zh || '',
+      contextWordZh: spanZh,
     };
 
     pop.innerHTML = `
@@ -1444,15 +1452,87 @@
     }
 
     state.wordPopup = { ...state.wordPopup, ...dict, saved };
-    const meanings = (dict.meanings || [])
+    // 卡片以中文为主：最上面是这个词在当前语境下的中文，往下是中文释义，
+    // 英文原文折到「英文释义」里默认收起 —— 用户要看的是翻译，不是英文解释。
+    const senses = (dict.meanings || [])
+      .filter((m) => m.defZh || m.def)
       .slice(0, 4)
-      .map((m) => `<li><i>${escapeHtml(m.pos)}</i> ${escapeHtml(m.def)}</li>`)
+      .map(
+        (m) =>
+          `<li>${
+            m.pos ? `<i>${escapeHtml(m.pos)}</i>` : ''
+          }<span>${escapeHtml(m.defZh || m.def)}</span></li>`
+      )
       .join('');
+    const enDefs = (dict.meanings || [])
+      .filter((m) => m.def)
+      .slice(0, 3)
+      .map(
+        (m) =>
+          `<li>${m.pos ? `<i>${escapeHtml(m.pos)}</i>` : ''}${escapeHtml(m.def)}</li>`
+      )
+      .join('');
+    // 视频里的原句 + 其中文译文：这是「这个词在这里到底什么意思」最直接的答案
+    const ctxEn = state.wordPopup?.context || '';
+    const ctxZh = state.wordPopup?.contextZh || '';
+    // 生词在译文里的译法（来自 zhSpans）。只有已加入生词本、且译文里高亮过才有。
+    // 它有时等于词典直译（引擎对单个词就是那样翻的），这时再显示一遍是冗余的，
+    // 反而让人以为「本句译作」和「单词直译」是两个不同答案 —— 只在真的不同才显示。
+    const spanZhRaw = state.wordPopup?.contextWordZh || '';
+    const ctxWordZh =
+      spanZhRaw && spanZhRaw !== (dict.zh || '') ? spanZhRaw : '';
+    const exEn = dict.example || '';
+    const exZh = dict.exampleZh || '';
+
     pop.querySelector('.trace-pop-body').innerHTML = `
       ${dict.phonetic ? `<div class="trace-pop-phon">${escapeHtml(dict.phonetic)}</div>` : ''}
-      ${dict.zh ? `<div class="trace-pop-zh">${escapeHtml(dict.zh)}</div>` : ''}
-      ${meanings ? `<ul class="trace-pop-meanings">${meanings}</ul>` : ''}
-      ${dict.example ? `<div class="trace-pop-ex">“${escapeHtml(dict.example)}”</div>` : ''}
+      ${
+        // 这句里它译成了什么 —— 比词典义更贴合当前语境，放最前面，
+        // 让用户先看到「复古」再看词典的「优质的」，就不会觉得两边打架。
+        ctxWordZh
+          ? `<div class="trace-pop-ctxword">本句译作「${escapeHtml(ctxWordZh)}」</div>`
+          : ''
+      }
+      ${
+        // 有中文释义清单时，清单就是主体；单词的「直译」降级成一行小字。
+        // 反过来（没有清单）时，直译就是唯一的中文，必须当主体显示。
+        // 早期两者都放大并列，用户会看到「优质的」和字幕里的「复古」打架，
+        // 以为翻译错了 —— 其实一个是词典义、一个是语境义。
+        senses
+          ? dict.zh
+            ? `<div class="trace-pop-gloss">单词直译：${escapeHtml(dict.zh)}</div>`
+            : ''
+          : dict.zh
+          ? `<div class="trace-pop-zh">${escapeHtml(dict.zh)}</div>`
+          : ''
+      }
+      ${senses ? `<ul class="trace-pop-senses">${senses}</ul>` : ''}
+      ${
+        ctxEn
+          ? `<div class="trace-pop-block">
+              <div class="trace-pop-label">本句译文</div>
+              <div class="trace-pop-ctx">${escapeHtml(ctxEn)}</div>
+              ${ctxZh ? `<div class="trace-pop-ctx-zh">${escapeHtml(ctxZh)}</div>` : ''}
+            </div>`
+          : ''
+      }
+      ${
+        exEn
+          ? `<div class="trace-pop-block">
+              <div class="trace-pop-label">例句</div>
+              <div class="trace-pop-ctx">${escapeHtml(exEn)}</div>
+              ${exZh ? `<div class="trace-pop-ctx-zh">${escapeHtml(exZh)}</div>` : ''}
+            </div>`
+          : ''
+      }
+      ${
+        enDefs
+          ? `<details class="trace-pop-more">
+              <summary>英文原文释义</summary>
+              <ul class="trace-pop-meanings">${enDefs}</ul>
+            </details>`
+          : ''
+      }
       <div class="trace-pop-actions">
         ${
           saved
@@ -1462,11 +1542,20 @@
       </div>`;
     // 内容渲染后弹窗变高了，必须重新定位，否则会压住字幕
     positionPopup(pop, rect);
+
+    // 展开/收起「英文原文释义」会改变卡片高度，也要重新定位，
+    // 否则展开后卡片向下长出去，正好盖住字幕。
+    const more = pop.querySelector('.trace-pop-more');
+    if (more) {
+      more.addEventListener('toggle', () => positionPopup(pop, rect));
+    }
   }
 
   function positionPopup(pop, rect) {
     const pad = 8;
-    const w = 300;
+    // 卡片内容变多了（中文释义 + 视频原句 + 例句 + 折叠的英文释义），
+    // 300px 宽会把中文释义挤成三四行；340px 在这个信息量下折行最舒服。
+    const w = 340;
     let left = rect.left + rect.width / 2 - w / 2;
     left = Math.max(pad, Math.min(left, window.innerWidth - w - pad));
     pop.style.width = w + 'px';
@@ -1474,6 +1563,9 @@
 
     // 先放到 0 处测量真实高度
     pop.style.top = '0px';
+    // 卡片变高后可能超出视口，给它一个上限（内容多时内部滚动）
+    const maxH = Math.round(window.innerHeight * 0.62);
+    pop.querySelector('.trace-pop-body').style.maxHeight = maxH + 'px';
     const h = pop.offsetHeight || 200;
 
     // 优先放在单词上方；但要避开整块字幕区域，别把正在看的字幕挡住

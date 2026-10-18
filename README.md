@@ -1352,6 +1352,157 @@ D8 立刻 FAIL（`midDragDodge: true`），说明它确实能抓住这个回归�
 
 ---
 
+### 查词卡片：从"英英词典截图"改成"中文优先的释义卡"
+
+用户原话（大意）：点了单词想看得更详细，但**里面尽量中文多一些** ——
+"我本来就是要看翻译，结果还给我来一堆英文会更加看不懂"。
+
+旧卡片几乎是 `dictionaryapi.dev` 的英英原文照搬：词性 `noun`/`verb` 原样漏出、
+释义整段英文、没有中文、没有音标。改造分三件事：
+
+**1. 词性必须译成中文。** 这是最隐蔽的一个 bug —— 早期 `POS_MAP` 只映射了缩写：
+
+```js
+const POS_MAP = { n: '名词', v: '动词', adj: '形容词', adv: '副词' };
+```
+
+但 `dictionaryapi.dev` 返回的是**全称** `noun` / `verb` / `adjective` / `adverb`，
+`POS_MAP['noun']` 是 `undefined`，于是回退成原样输出，用户看到的就是满屏 `noun`。
+修法是把全称和缩写一起收进表，并加兜底 `|| m.pos`：
+
+```js
+const POS_MAP = {
+  n: '名词', noun: '名词',
+  v: '动词', verb: '动词',
+  adj: '形容词', adjective: '形容词',
+  adv: '副词', adverb: '副词',
+  prep: '介词', preposition: '介词',
+  conj: '连词', conjunction: '连词',
+  pron: '代词', pronoun: '代词',
+  det: '限定词', determiner: '限定词',
+  interj: '感叹词', interjection: '感叹词',
+};
+```
+
+**2. 释义、例句都要有中文。** `lookupWord()` 里对英文释义和例句各跑一次
+Google 翻译，并行发出（`Promise.all`），任何一条失败都不影响其它部分：
+
+```js
+const [defsZh, exZh] = await Promise.all([
+  defZhOf(meanings),      // 释义逐条翻
+  defZhOf(example),       // 例句翻
+]);
+```
+
+**3. 英文原文折进 `<details>`，默认收起。** 英文不是不要，而是不能当主体。
+折叠后卡片可见部分的中文占比从 0.34 提到 **0.65**（`test-dict.js` 的 D8 断言）。
+这个占比只统计**可见**文本 —— `<details>` 未展开时其内容仍是 `textContent`
+的一部分，直接量会得到虚低的数字，量到的就不是用户真正读到的内容。
+
+#### 卡片结构（从上到下）
+
+| 区块 | 内容 | 为什么在这个位置 |
+|---|---|---|
+| 标题 | `vintage` + 音标 `/ˈvɪn.tɪdʒ/` | 先确认查的是哪个词 |
+| **本句译作「立即」** | 绿色高亮条 | 见下「语境义 vs 词典义」 |
+| 单词直译 | 一行小字 | 词典给的最短中文 |
+| 中文释义清单 | `副词` + 中文解释，最多 4 条 | 主体内容 |
+| 本句译文 | 视频原句 + 其中文 | 把词放回它出现的那句话 |
+| 例句 | 词典例句 + 中文 | 补充用法 |
+| 英文原文释义 | `<details>` 默认收起 | 需要时再看 |
+| 按钮 | `＋ 加入生词本` / `✓ 已在生词本` | 主动作 |
+
+#### 语境义 vs 词典义：用户说"翻译不一样"的真相
+
+用户的第二句抱怨是"会出现翻译不一样的情况"。查下来这是**真实的**，但不是 bug：
+
+```
+字幕译文：看。这是正确的年份。      ← Google 按语境翻的
+词典直译：优质的                   ← dictionaryapi.dev 的通用义
+```
+
+`vintage` 在这里是"年份酒/佳酿"，词典给"优质的"是它的形容词义。两个都对，
+只是来源不同。用户看到两个不同的中文，自然会以为翻错了。
+
+真正权威的是**它在这句话里被译成了什么** —— 而这个信息后台已经算过了：
+生词在译文里高亮时，`translateAligned` 会返回 `spans[{word, zh, start, end}]`，
+`zh` 就是这个词在该句中的译法。所以卡片把它显示在最上面：
+
+```js
+const spanZh =
+  (state.active?.zhSpans || []).find(
+    (s) => String(s?.word || '').toLowerCase() === String(canon).toLowerCase()
+  )?.zh || '';
+```
+
+**但只在真的不同时才显示。** 实测 8 个词，只有 1 个不同：
+
+| 词 | 词典直译 | 本句译作 | 不同 |
+|---|---|---|---|
+| vintage | 优质的 | 优质的 | |
+| lounge | 休息室 | 休息室 | |
+| naturally | 自然 | 自然 | |
+| smallest | 最小的 | 最小的 | |
+| **immediately** | **立即地** | **立即** | ✓ |
+| beverage | 饮料 | 饮料 | |
+| pipeline | 管道 | 管道 | |
+| happier | 更快乐 | 更快乐 | |
+
+引擎对单个词往往就翻成和词典一样，这时再显示一遍「本句译作 优质的」
+反而会让人以为这是**两个不同答案**。所以去重条件是 `spanZh !== dict.zh`：
+
+```js
+const ctxWordZh = spanZhRaw && spanZhRaw !== (dict.zh || '') ? spanZhRaw : '';
+```
+
+`test-dict.js` 的 D15 断言的是这个**不变式**（要么没有这条，要么它确实与直译不同），
+D18 则专门用 `immediately` 验证「真的不同时两条都出现且视觉可区分」。
+
+#### 展开英文释义后盖住字幕
+
+`positionPopup()` 只在初始渲染后调用一次，而 `<details>` 展开会改变卡片高度 ——
+卡片向下长出去正好压住字幕，而字幕是用户此刻最需要对照的东西。
+修法是监听 `toggle` 事件重新定位：
+
+```js
+const more = pop.querySelector('.trace-pop-more');
+if (more) {
+  more.addEventListener('toggle', () => positionPopup(pop, rect));
+}
+```
+
+这个问题是**看截图才发现的** —— D12（初始不遮挡）当时是通过的，
+但没人展开过 `<details>` 再量一次。补了 D13 断言后才有防护。
+
+#### 回归实测（`node test-dict.js`）
+
+```
+✓ D1 字幕里找到并点击了 vintage
+✓ D2 卡片打开且标题是 vintage
+✓ D3 词性是中文（noun/verb 不能原样漏出）
+✓ D4 中文释义至少 2 条                  {count:4}
+✓ D5 词典中文释义在（vintage → 优质的之类）{zh:"单词直译：优质的", hasSenses:true}
+✓ D6 英文释义存在但默认收起              {hasMore:true, moreOpen:false, enDefsCount:3}
+✓ D7 有「本句译文」区块且带中文          {ctxEn:"look. This is proper vintage.", ctxZh:"看。这是正确的年份。"}
+✓ D8 可见正文中文占比 > 0.6             {cjkRatio:0.65, cjkRatioAll:0.34}
+✓ D9 卡片宽度 340 且不超出视口           {width:340}
+✓ D12 卡片不遮挡字幕                    {overlapPx:-8}
+✓ D10 展开英文释义后卡片不超出视口        {top:70, bottom:594, vh:860}
+✓ D13 展开英文释义后仍不遮挡字幕          {overlapPx:-8}
+✓ D11 无 JS 错误                       {errors:[]}
+✓ D14 已收藏的词在字幕里高亮且可点
+✓ D15 语境义提示只在不同于直译时出现      {ctxWord:"", gloss:"单词直译：优质的", differs:false}
+✓ D16 已收藏的词按钮显示「已在生词本」    {btnText:"✓ 已在生词本", btnAct:"remove"}
+✓ D17 immediately 已收藏且在字幕里高亮可点
+✓ D18 语境义与直译不同时，两条都显示且能区分 {ctxWord:"本句译作「立即」", gloss:"单词直译：立即地"}
+RESULT: PASS（查词卡片：词性中文 + 中文释义 + 本句译文 + 英文默认收起）
+```
+
+D8 的 `cjkRatio:0.65` 与 `cjkRatioAll:0.34` 之差就是折叠英文释义的效果 ——
+如果不折叠，用户面对的是三分之一中文、三分之二英文的卡片。
+
+---
+
 ## 三、安装与使用
 
 ### 加载扩展
@@ -1434,6 +1585,7 @@ node test-forms.js           # 词形归一化：收藏 beverage 也高亮 bever
 node test-backup.js          # 生词本写本机文件 + 卸载重装后恢复 + 合并保留学习进度
 node test-global.js          # 全局显示悬浮条 + 离开画面自动隐藏 + 迷你播放器不贴小窗
 node test-dodge.js           # 字幕压住 YouTube 设置菜单时让路（淡出 + 点击穿透）
+node test-dict.js            # 查词卡片中文优先（词性中文 + 释义中文化 + 语境义）
 ```
 
 `tools/mock/` 用 Playwright `page.route()` 整体伪造 `https://www.youtube.com/**`，
@@ -1567,6 +1719,8 @@ D:\MyFiles\项目\Trace\
    ├─ test-backup.js            生词本落盘回归（写文件/卸载恢复/合并进度/自选目录）
    ├─ test-global.js            全局显示悬浮条 + 离开画面隐藏 + 迷你播放器避让
    ├─ test-dodge.js             字幕压住设置菜单时让路（淡出 + 点击穿透）
+├─ test-dict.js              查词卡片中文优先（词性中文 + 释义中文化 + 语境义）
+├─ shot-dict.png             查词卡片：本句译作「立即」与单词直译「立即地」并存
    ├─ probe-ext2\               主世界 vs 隔离世界对照实验
    ├─ probe-transcript.js       get_transcript 接口探针
    ├─ gen-icons.js              纯 Node 生成 PNG 图标

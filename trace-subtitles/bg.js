@@ -924,16 +924,26 @@ const POS_MAP = {
   n: '名词', v: '动词', adj: '形容词', adv: '副词', pron: '代词',
   prep: '介词', conj: '连词', det: '限定词', interj: '感叹词',
   num: '数词', aux: '助动词', phrase: '短语',
+  // dictionaryapi.dev 返回的是**全称**（noun / verb / adjective），不是缩写。
+  // 早期只映射了缩写，于是 POS_MAP['noun'] 取不到值，一路回退成英文原文，
+  // 卡片上就出现了 noun / verb / adjective —— 用户说的「一堆英文」里有一部分是这个。
+  noun: '名词', verb: '动词', adjective: '形容词', adverb: '副词',
+  pronoun: '代词', preposition: '介词', conjunction: '连词',
+  determiner: '限定词', interjection: '感叹词', numeral: '数词',
+  auxiliary: '助动词', article: '冠词', particle: '小品词',
+  'proper noun': '专有名词', exclamation: '感叹词',
 };
 
 async function lookupWord(word) {
   const w = word.trim();
   if (!w) return null;
-  const key = 'dict|' + w.toLowerCase();
+  // dict2：旧缓存里的 meanings 只有英文 def、没有 defZh，也没有例句中文，
+  // 不换版本号的话用户刷新后看到的还是旧卡片。
+  const key = 'dict2|' + w.toLowerCase();
   const cached = await idbGet('translations', key);
   if (cached && cached.dict) return cached.dict;
 
-  const dict = { word: w, phonetic: '', meanings: [], example: '', zh: '' };
+  const dict = { word: w, phonetic: '', meanings: [], example: '', exampleZh: '', zh: '', senses: [] };
 
   // 词典与中文释义并行请求，谁慢谁降级，不互相拖累
   const dictTask = (async () => {
@@ -951,12 +961,17 @@ async function lookupWord(word) {
       if (!e) return;
       dict.phonetic =
         e.phonetic || (e.phonetics || []).map((p) => p.text).find(Boolean) || '';
+      // 每个词性最多取 2 条释义，整体最多 6 条 —— 再多会挤满卡片，
+      // 而且要逐条翻成中文，条数直接决定查词延迟。
       (e.meanings || []).slice(0, 4).forEach((m) => {
         (m.definitions || []).slice(0, 2).forEach((d) => {
+          if (dict.meanings.length >= 6) return;
           dict.meanings.push({
             pos: POS_MAP[m.partOfSpeech] || m.partOfSpeech || '',
             def: d.definition || '',
+            defZh: '',
             example: d.example || '',
+            exampleZh: '',
           });
         });
       });
@@ -970,16 +985,31 @@ async function lookupWord(word) {
     }
   })();
 
-  const zhTask = (async () => {
-    try {
-      const zh = await googleTranslate([w], 'en', 'zh-CN');
-      dict.zh = zh[0] || '';
-    } catch (_) {
-      dict.zh = '';
-    }
-  })();
+  await Promise.all([dictTask]);
 
-  await Promise.all([dictTask, zhTask]);
+  // 一次批量请求翻完三件事：单词直译、每条英文释义、例句。
+  // 早期单词直译是单独一次 googleTranslate，释义又批量一次 —— 两次往返，
+  // 而且其中一次超时就会出现「释义有中文、直译却是空」的残缺卡片。
+  // 合成一次后要么都有、要么都没有，且少一个网络往返。
+  const toZh = [w];
+  for (const m of dict.meanings) if (m.def) toZh.push(m.def);
+  if (dict.example) toZh.push(dict.example);
+  try {
+    const outs = await googleTranslate(toZh, 'en', 'zh-CN');
+    let i = 0;
+    dict.zh = outs[i++] || '';
+    for (const m of dict.meanings) {
+      if (m.def) m.defZh = outs[i++] || '';
+    }
+    if (dict.example) dict.exampleZh = outs[i] || '';
+  } catch (_) {
+    /* 翻译失败就只留英文释义，不影响卡片可用 */
+  }
+
+  // 词义清单：同一词性下把中文释义收拢成一行，方便快速扫读
+  dict.senses = dict.meanings
+    .filter((m) => m.defZh || m.def)
+    .map((m) => ({ pos: m.pos, text: m.defZh || m.def }));
 
   await idbPut('translations', { key, dict, createdAt: Date.now() });
   return dict;
