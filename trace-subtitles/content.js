@@ -320,7 +320,7 @@
         </div>
       </div>
       <div class="tp-actions">
-        <button class="tp-btn" type="button" data-act="reset-pos">恢复居中</button>
+        <button class="tp-btn" type="button" data-act="reset-pos">恢复默认位置</button>
         <button class="tp-btn tp-primary" type="button" data-act="wordbook">生词本</button>
       </div>`;
     document.documentElement.appendChild(panelEl);
@@ -503,13 +503,15 @@
     }
   }
 
-  /** 按当前保存的位置重新摆一次字幕框（拖动、换句、视频框变化后调用） */
+  /**
+   * 按当前保存的位置重新摆一次字幕框（拖动、换句、视频框变化后调用）。
+   * 只处理纵向：水平方向永远由 CSS 居中（left:50% + translateX(-50%)），
+   * 这样句子长短变化时字幕不会左右跳，也不需要再夹紧横向边界。
+   */
   function reapplyFreePos() {
     if (!boxEl) return;
     const g = overlayGeom();
-    const cx = parseFloat(boxEl.style.left);
     const cy = parseFloat(boxEl.style.top);
-    boxEl.style.left = clampCenterX(Number.isFinite(cx) ? cx : g.width / 2) + 'px';
     const h = boxEl.offsetHeight || 0;
     const y = Number.isFinite(cy) ? cy : g.height * 0.8;
     boxEl.style.top = Math.round(Math.max(4, Math.min(y, Math.max(4, g.height - h - 4)))) + 'px';
@@ -517,9 +519,10 @@
 
   /**
    * 把保存的自由位置应用到字幕框。
-   * 位置按**覆盖层（=视频框）的归一化比例**保存（nx/ny，0~1），
-   * 这样换窗口大小、进全屏、切影院模式都不会跑位。
-   * 兼容早期版本存的绝对像素 {x, y}（那时覆盖层还等于视口）。
+   * 位置只记纵向比例 ny（0~1），水平方向固定居中 —— 这是刻意的：
+   * 字幕框宽度随句子长短变化，允许横向拖动会让「居中」这件事变得没有保证，
+   * 用户每次都得重新摆；只放开纵向既够用又稳定。
+   * 兼容旧数据：早期存过 {nx, ny} 或 {x, y}，这里只取纵向分量。
    */
   function applyFreePosition(pos) {
     if (!boxEl) return;
@@ -530,31 +533,20 @@
       return;
     }
     overlayEl.dataset.free = '1';
+    // 水平方向不写 left，交给 CSS 居中（含面板打开时的让位规则）
+    boxEl.style.left = '';
     const g = overlayGeom();
-    let cx, cy;
-    if (Number.isFinite(pos.nx)) {
-      cx = pos.nx * g.width;
-      cy = (Number.isFinite(pos.ny) ? pos.ny : 0.8) * g.height;
+    let cy;
+    if (Number.isFinite(pos.ny)) {
+      cy = pos.ny * g.height;
+    } else if (Number.isFinite(pos.y)) {
+      // 更早的版本存的是视口绝对像素
+      cy = pos.y;
     } else {
-      // 旧数据：视口绝对像素
-      cx = Number.isFinite(pos.x) ? pos.x : g.width / 2;
-      cy = Number.isFinite(pos.y) ? pos.y : g.height * 0.8;
+      cy = g.height * 0.8;
     }
-    boxEl.style.left = clampCenterX(cx) + 'px';
     const h = boxEl.offsetHeight || 0;
     boxEl.style.top = Math.round(Math.max(4, Math.min(cy, Math.max(4, g.height - h - 4)))) + 'px';
-  }
-
-  /** 把中心 x 限制在视频框内，保证整块字幕都看得见 */
-  function clampCenterX(cx) {
-    const g = overlayGeom();
-    const half = (boxEl?.offsetWidth || 0) / 2;
-    const min = half + 4;
-    // 面板打开时右边界要缩到面板左侧，否则字幕会被面板盖住一截
-    const rightEdge = g.width - panelReservePx();
-    const max = rightEdge - half - 4;
-    if (max < min) return rightEdge / 2;
-    return Math.round(Math.max(min, Math.min(cx, max)));
   }
 
   /** 页内面板当前是否可见 */
@@ -573,7 +565,10 @@
     if (state.settings?.freePos && boxEl) reapplyFreePos();
   }
 
-  /** 拖拽：按住顶部手柄移动字幕框，位置持久化（归一化到视频框，记录的是框的中心点） */
+  /**
+   * 拖拽：按住顶部手柄上下移动字幕框，位置持久化（归一化到视频框的纵向比例）。
+   * 水平方向锁死在中间 —— 句子长短变化时字幕以画面中心为轴伸缩，不会左右跑。
+   */
   function initDrag() {
     let drag = null;
 
@@ -582,8 +577,8 @@
       ev.preventDefault();
       ev.stopPropagation();
       const r = boxEl.getBoundingClientRect();
-      // 记录指针相对“框中心”的偏移，拖动过程中中心点跟随指针，且不随句子长短漂移
-      drag = { dx: ev.clientX - (r.left + r.width / 2), dy: ev.clientY - r.top };
+      // 只记纵向偏移：指针相对框顶的距离。横向不参与计算。
+      drag = { dy: ev.clientY - r.top };
       boxEl.classList.add('trace-dragging');
       handleEl.setPointerCapture?.(ev.pointerId);
     };
@@ -593,13 +588,11 @@
       ev.preventDefault();
       const g = overlayGeom();
       const h = boxEl.offsetHeight || 0;
-      // 指针坐标是视口的，覆盖层坐标系是视频框的 → 先减去视频框左上角
-      const cx = clampCenterX(ev.clientX - drag.dx - g.left);
+      // 指针坐标是视口的，覆盖层坐标系是视频框的 → 先减去视频框上沿
       const localY = ev.clientY - drag.dy - g.top;
       const y = Math.max(4, Math.min(localY, Math.max(4, g.height - h - 4)));
-      applyFreePosition({ nx: cx / g.width, ny: y / g.height });
+      applyFreePosition({ ny: y / g.height });
       // 立即回写成像素，避免拖动过程中反复按比例换算产生累积误差
-      boxEl.style.left = cx + 'px';
       boxEl.style.top = Math.round(y) + 'px';
     };
 
@@ -608,10 +601,8 @@
       drag = null;
       boxEl.classList.remove('trace-dragging');
       const g = overlayGeom();
-      const px = parseFloat(boxEl.style.left);
       const py = parseFloat(boxEl.style.top);
       savePosition({
-        nx: (Number.isFinite(px) ? px : g.width / 2) / g.width,
         ny: (Number.isFinite(py) ? py : 0) / g.height,
       });
     };
@@ -713,7 +704,7 @@
         realignActive();
       }
     }
-    // 句子变长/变短后框宽会变，自由模式下重新夹紧中心点，避免贴边溢出
+    // 句子变长/变短后框高可能变化，自由模式下重新夹一次纵向位置，避免下半截出画面
     if (state.settings?.freePos) reapplyFreePos();
   }
 

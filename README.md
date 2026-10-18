@@ -429,6 +429,13 @@ function clampCenterX(cx) {
 回归测试 `tools/test-center.js` 实测：短句 762px / 长句 1232px，两者中心都是 620px，
 `driftPx: 0`；拖到最左边时 `leftEdge: 4`，正确被夹在视口内。
 
+> **后续修正**：这套"按中心点定位 + 夹紧"的方案后来整个被替换了。
+> 用户要求对齐 Trancy 的行为 —— **只能上下移动，横向固定居中**。
+> 这样比"允许横向拖动再夹紧"更省事：横向根本不由 JS 控制（永远是 CSS 的
+> `left:50%` + `translateX(-50%)`），`clampCenterX()` 因此被删除，也不用在每次
+> 换句后重新夹紧。上面这段代码只作为历史记录保留。
+> 新方案的回归测试断言：把指针往右拖 500px，框中心 640 → 640（纹丝不动）。
+
 > 顺带记一个**测试台自身的坑**：早期用
 > `Object.defineProperty(video, 'currentTime', { get: … })` 伪造播放进度，
 > 但那个只改到**主世界**的 DOM wrapper，内容脚本跑在隔离世界读到的是原生
@@ -1045,11 +1052,14 @@ RESULT: PASS（生词本写成本机文件 + 卸载重装后可恢复 + 合并�
   翻译字幕语言、翻译引擎、字幕显示模式，加上可折叠的「字幕样式」与「更多功能」分组
 - **字幕样式实时调节**：原文字号 / 译文字号 / 原文颜色 / 译文颜色 / 背景不透明度 / 圆角 /
   高斯模糊 / 整体缩放，8 项全部即时生效并持久化
-- **自由拖动**：鼠标移到字幕框上，顶部浮出黑色胶囊（3 个白点）→ 按住即可拖到任意位置；
+- **上下拖动（横向锁死居中）**：鼠标移到字幕框上，顶部浮出黑色胶囊（3 个白点）→ 按住即可
+  **上下移动**；横向不响应拖动，字幕永远水平居中于画面。
+  这样设计的理由：字幕框宽度随句子长短变化，允许横向拖动会让"居中"失去保证，每换一句
+  都得重新摆；只放开纵向既够用又稳定 —— 与 Trancy 的行为一致。
   **不碰字幕时手柄完全不显示**（`opacity:0` + `visibility:hidden` + `pointer-events:none`），
   移开鼠标后约 0.5s 淡出，绝不干扰画面；
-  **拖动后按"中心点"定位**，句子变长变短都从中心向两侧对称伸缩，不会左右横跳；
-  位置自动记住，换视频/刷新都保持；面板或 popup 里「恢复居中」可回到默认底部位置
+  位置自动记住（只记纵向比例），换视频/刷新/全屏/改窗口大小都保持；
+  面板或 popup 里「恢复居中」可回到默认底部位置
 - **点击查词**：点字幕里任意单词 → 音标 + 中文释义 + 英文释义 + 例句
 - **生词本**：一键加入，记录单词/释义/**所在句子与译文**/视频标题/时间点，可搜索、删除、
   导出 JSON，点击条目跳回原视频那一秒
@@ -1081,7 +1091,7 @@ cd tools
 npm i                        # 安装 playwright
 node test-mock.js            # 基础链路 + 查词 + 生词本 + 高亮，输出 PASS/FAIL + shot-mock.png
 node test-pot.js             # pot 签名回归测试 + 截图 shot-pot.png
-node test-center.js          # 拖动后按中心点定位（长短句不左右跳）+ 截图 shot-center.png
+node test-center.js          # 拖动行为：横向锁死居中 + 纵向可拖 + 换句不漂移
 node test-ui.js              # 手柄悬停显隐 + 悬浮按钮 + 页内面板 + 字幕样式，截图 shot-ui*.png
 node test-zh-highlight.js    # 译文里对应中文也高亮（多词 / 点击 / 移除），截图 shot-zh-highlight.png
 node test-wordbook.js        # 词库看板：KPI/状态环/柱状图/筛选/搜索/抽屉/复习/删除/粒度切换
@@ -1123,19 +1133,25 @@ timedtext hits: [{ hasPot: true, pot: "MOCK_POT_TOKEN" }]
 RESULT: PASS (网络钩子成功绕过 pot 限制)
 ```
 
-居中回归（拖动后短句 762px / 长句 1232px，中心完全不动）：
+拖动行为回归（横向锁死居中 + 纵向可拖 + 换句不漂移）：
 
 ```
-targetX: 760  expectClamped: 660  centerAfterDrag: 660  followsCursor: true
-leftEdgeAfterClamp: 4  leftCenterAfterClamp: 620  clampedInside: true
-shortWidth: 762   longWidth: 1232
-shortCenter: 620  longCenter: 620   driftPx: 0
-RESULT: PASS（中心不漂移 + 跟随鼠标 + 不溢出视口 + 至少两句不同长度）
+viewportCenter: 640
+centerBefore: 640   centerAfterHorizontalDrag: 640   horizontalDrift: 0   horizontalLocked: true
+topBefore: 635      topAfterDragDown: 695            movedDownPx: 60      verticalWorks: true
+topAfterDragUp: 29  wentUp: true                     clampedTop: true
+shortWidth: 762     longWidth: 1232
+shortCenter: 640    longCenter: 640                  sentenceDrift: 0     topDrift: 0
+RESULT: PASS（横向锁死居中 + 纵向可拖且不越界 + 换句不漂移）
 ```
 
-`expectClamped` 这个字段值得说明：拖动那一刻显示的是最长句（1232px），
-`clampCenterX` 会把中心夹到 `1280 - 1232/2 - 4 = 660`，所以目标 760 会被正确夹紧。
-测试早期硬编码"期望 760"导致误报失败，现在按当时框宽动态计算期望值。
+测试里把指针往右拖了 500px，框中心纹丝不动（640 → 640）；同时下移 60px 则正常生效。
+这直接证明了"横向锁死、纵向放开"这条约束。
+
+> 早期版本允许横向拖动，靠 `clampCenterX()` 把中心点夹在视口内。那套逻辑能保证
+> "长短句不左右跳"，但用户仍要自己摆位置，而且框一换句宽度就变、夹紧值也跟着变。
+> 改成横向锁死后，`clampCenterX()` 整个函数都被删掉了 —— 不需要再夹，因为横向
+> 根本不由 JS 控制，永远是 CSS 的 `left:50%` + `translateX(-50%)`。
 
 UI 回归（手柄悬停显隐 + 悬浮按钮 + 页内面板 + 字幕样式）：
 
@@ -1207,7 +1223,7 @@ D:\MyFiles\项目\Trace\
    ├─ mock\server.js            本地夹具站点 :8899
    ├─ test-mock.js              端到端自动化测试（字幕/查词/生词本/高亮）
    ├─ test-pot.js               pot 签名回归测试
-   ├─ test-center.js            拖动后中心点定位回归测试
+   ├─ test-center.js            拖动行为回归（横向锁死居中 + 纵向可拖）
    ├─ test-ui.js                手柄显隐 + 悬浮按钮 + 页内面板 + 字幕样式回归测试
    ├─ test-zh-highlight.js      译文里对应中文高亮回归测试（多词/点击/移除）
    ├─ test-wordbook.js          词库看板回归测试（KPI/图表/筛选/抽屉/复习）
@@ -1219,7 +1235,7 @@ D:\MyFiles\项目\Trace\
    ├─ gen-icons.js              纯 Node 生成 PNG 图标
    ├─ shot-mock.png             验证截图（高亮 + 查词卡）
    ├─ shot-pot.png              pot 模式验证截图
-   ├─ shot-center.png           居中验证截图
+   ├─ shot-center.png           拖动后居中验证截图
    ├─ shot-ui.png               悬浮按钮 + 放大字号截图
    ├─ shot-ui-panel.png         页内设置面板展开截图
    ├─ shot-zh-highlight.png     译文中文高亮截图

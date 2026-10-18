@@ -1,9 +1,14 @@
 /**
- * 需求①回归测试：拖动后字幕框必须以「中心点」定位，句子长短变化时对称伸缩，
- * 不能出现「框变长就往右长、文字看起来在乱动」的情况。
+ * 拖动行为回归测试。
  *
- * 做法：拖到某个 x，记录框的 center；然后强制切换到长短差异很大的句子，
- * 断言 center 不变（允许 ±2px 误差）。
+ * 设计约束（用户要求，对齐 Trancy）：**只能上下移动，横向永远居中**。
+ * 理由：字幕框宽度随句子长短变化，允许横向拖动会让"居中"这件事失去保证，
+ * 每换一句都得重新摆；只放开纵向既够用又稳定。
+ *
+ * 所以这里断言三件事：
+ *   1. 横向拖不动：把指针横向移很远，框的中心仍在画面中心（±2px）
+ *   2. 纵向能拖：拖动后 top 变了，且与指针位置对应
+ *   3. 换句不漂移：长短两句的中心完全一致（横向锁定的直接结果）
  */
 const path = require('path');
 const { chromium } = require('playwright');
@@ -12,6 +17,8 @@ const F = require('./mock/fixtures');
 const CHROME = 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
 const EXT = path.resolve(__dirname, '..', 'trace-subtitles');
 const ORIGIN = 'https://www.youtube.com';
+const VW = 1280;
+const VH = 900;
 
 (async () => {
   const ctx = await chromium.launchPersistentContext('.chrome-center', {
@@ -19,7 +26,7 @@ const ORIGIN = 'https://www.youtube.com';
     executablePath: CHROME,
     ignoreDefaultArgs: ['--enable-automation'],
     args: [`--disable-extensions-except=${EXT}`, `--load-extension=${EXT}`, '--no-first-run', '--mute-audio'],
-    viewport: { width: 1280, height: 900 },
+    viewport: { width: VW, height: VH },
   });
 
   const cors = { 'access-control-allow-origin': ORIGIN, 'access-control-allow-credentials': 'true' };
@@ -39,50 +46,46 @@ const ORIGIN = 'https://www.youtube.com';
   await page.waitForSelector('.trace-sub-box', { state: 'attached', timeout: 20000 });
   await page.waitForTimeout(2500);
 
-  // 1) 拖到画面中间偏右（不会被 clamp 夹到，用来验证"中心跟随鼠标"）
-  //    注意：手柄现在是「悬停字幕框才显形」（visibility/pointer-events 都切），
-  //    所以必须先把鼠标移到字幕框上让它出现，再去抓手柄。
-  const box = await page.locator('.trace-sub-box').boundingBox();
-  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
-  await page.waitForTimeout(300);
+  const box0 = await page.locator('.trace-sub-box').boundingBox();
+  const center0 = box0.x + box0.width / 2;
+
+  // ---- 1) 横向拖动：指针移到画面最右，框的中心应该纹丝不动 ----
+  // 手柄是「悬停字幕框才显形」，所以先悬停让手柄出来
+  await page.mouse.move(box0.x + box0.width / 2, box0.y + box0.height / 2);
+  await page.waitForTimeout(320);
   const handle = await page.locator('.trace-drag-handle').boundingBox();
-  const targetX = 760;
   await page.mouse.move(handle.x + handle.width / 2, handle.y + handle.height / 2);
-  await page.waitForTimeout(150);
+  await page.waitForTimeout(160);
   await page.mouse.down();
-  await page.mouse.move(targetX, handle.y + handle.height / 2, { steps: 12 });
+  // 往右拖 500px，同时略微下移（横向应完全无效，纵向应生效）
+  await page.mouse.move(handle.x + handle.width / 2 + 500, handle.y + handle.height / 2 + 60, { steps: 15 });
   await page.mouse.up();
   await page.waitForTimeout(400);
 
-  const afterDrag = await page.locator('.trace-sub-box').boundingBox();
-  const centerAfterDrag = afterDrag.x + afterDrag.width / 2;
-  // 拖动时的那句话可能很宽（最长句 1232px），此时 targetX=760 会被 clampCenterX
-  // 夹到 max = innerWidth - width/2 - 4。所以期望值要按当时的框宽算，不能硬编码 760。
-  const expectClamped = (() => {
-    const half = afterDrag.width / 2;
-    const min = half + 4;
-    const max = 1280 - half - 4;
-    if (max < min) return 1280 / 2;
-    return Math.round(Math.max(min, Math.min(targetX, max)));
-  })();
+  const afterH = await page.locator('.trace-sub-box').boundingBox();
+  const centerH = afterH.x + afterH.width / 2;
+  const hDrift = Math.abs(centerH - VW / 2);
+  const movedDown = afterH.y - box0.y;
 
-  // 2) 再拖到最左边，验证 clampCenterX 把框夹在视口内（不溢出）
-  //    注意：拖动后把手位置变了，必须重新取；同样要先悬停字幕框让手柄显形
-  await page.mouse.move(afterDrag.x + afterDrag.width / 2, afterDrag.y + afterDrag.height / 2);
-  await page.waitForTimeout(300);
+  // ---- 2) 纵向拖动：往上拖到接近画面顶部，框应跟着上去且不越界 ----
+  await page.mouse.move(afterH.x + afterH.width / 2, afterH.y + afterH.height / 2);
+  await page.waitForTimeout(320);
   const handle2 = await page.locator('.trace-drag-handle').boundingBox();
   await page.mouse.move(handle2.x + handle2.width / 2, handle2.y + handle2.height / 2);
-  await page.waitForTimeout(150);
+  await page.waitForTimeout(160);
   await page.mouse.down();
-  await page.mouse.move(10, handle2.y + handle2.height / 2, { steps: 12 });
+  // 拖到视口 y=20（远超上边界），验证纵向夹紧
+  await page.mouse.move(handle2.x + handle2.width / 2, 20, { steps: 15 });
   await page.mouse.up();
   await page.waitForTimeout(400);
-  const leftBox = await page.locator('.trace-sub-box').boundingBox();
-  const leftCenter = leftBox.x + leftBox.width / 2;
-  const expectedMin = leftBox.width / 2 + 4;
 
-  // 3) 自然播放采样：抓不同句子的宽度与中心，验证中心恒定
-  //    （MediaStream 不能 seek，只能等时间自然走到不同句子）
+  const topBox = await page.locator('.trace-sub-box').boundingBox();
+  const topCenter = topBox.x + topBox.width / 2;
+  const topDrift = Math.abs(topCenter - VW / 2);
+  const clampedTop = topBox.y >= 0;
+  const wentUp = topBox.y < afterH.y;
+
+  // ---- 3) 换句采样：不同长度的句子，中心必须完全一致 ----
   const samples = [];
   for (let i = 0; i < 40; i++) {
     const s = await page.evaluate(() => {
@@ -91,13 +94,18 @@ const ORIGIN = 'https://www.youtube.com';
       const box = document.querySelector('.trace-sub-box');
       if (!v || !orig || !box) return null;
       const r = box.getBoundingClientRect();
-      return { t: Math.round(v.currentTime * 10) / 10, text: (orig.textContent || '').trim(), width: Math.round(r.width), center: Math.round(r.x + r.width / 2) };
+      return {
+        t: Math.round(v.currentTime * 10) / 10,
+        text: (orig.textContent || '').trim(),
+        width: Math.round(r.width),
+        center: Math.round(r.x + r.width / 2),
+        top: Math.round(r.y),
+      };
     });
     if (s && s.text) samples.push(s);
     await page.waitForTimeout(300);
   }
 
-  // 按文本去重，取宽度最大和最小的两个不同句子
   const uniq = [];
   for (const s of samples) if (!uniq.find((u) => u.text === s.text)) uniq.push(s);
   uniq.sort((a, b) => a.width - b.width);
@@ -105,21 +113,27 @@ const ORIGIN = 'https://www.youtube.com';
   const longBox = uniq[uniq.length - 1];
   const shortCenter = shortBox ? shortBox.center : 0;
   const longCenter = longBox ? longBox.center : 0;
+  const sentenceDrift = Math.abs(shortCenter - longCenter);
 
   await page.screenshot({ path: 'shot-center.png' });
 
-  const drift = Math.abs(shortCenter - longCenter);
-  const followsCursor = Math.abs(centerAfterDrag - expectClamped) <= 6;
-  const clampedInside = leftBox.x >= 0 && leftCenter >= expectedMin - 2;
+  const dataFree = await page.getAttribute('#trace-sub-overlay', 'data-free');
   console.log(JSON.stringify({
-    targetX,
-    expectClamped,
-    centerAfterDrag: Math.round(centerAfterDrag),
-    followsCursor,
-    leftEdgeAfterClamp: Math.round(leftBox.x),
-    leftCenterAfterClamp: Math.round(leftCenter),
-    expectedMinCenter: Math.round(expectedMin),
-    clampedInside,
+    viewportCenter: VW / 2,
+    // 横向
+    centerBefore: Math.round(center0),
+    centerAfterHorizontalDrag: Math.round(centerH),
+    horizontalDrift: Math.round(hDrift * 10) / 10,
+    horizontalLocked: hDrift <= 2,
+    // 纵向
+    topBefore: Math.round(box0.y),
+    topAfterDragDown: Math.round(afterH.y),
+    movedDownPx: Math.round(movedDown),
+    verticalWorks: movedDown > 20,
+    topAfterDragUp: Math.round(topBox.y),
+    wentUp,
+    clampedTop,
+    // 换句
     distinctSentences: uniq.length,
     shortText: shortBox ? shortBox.text : '',
     longText: longBox ? longBox.text : '',
@@ -127,12 +141,24 @@ const ORIGIN = 'https://www.youtube.com';
     longWidth: longBox ? longBox.width : 0,
     shortCenter,
     longCenter,
-    driftPx: Math.round(drift * 10) / 10,
-    dataFree: await page.getAttribute('#trace-sub-overlay', 'data-free'),
+    sentenceDrift: Math.round(sentenceDrift * 10) / 10,
+    topDrift: Math.round(topDrift * 10) / 10,
+    dataFree,
   }, null, 2));
 
-  const ok = drift <= 2 && followsCursor && clampedInside && uniq.length >= 2;
-  console.log(`RESULT: ${ok ? 'PASS' : 'FAIL'}（中心不漂移 + 跟随鼠标 + 不溢出视口 + 至少两句不同长度）`);
+  const ok =
+    hDrift <= 2 &&
+    topDrift <= 2 &&
+    movedDown > 20 &&
+    wentUp &&
+    clampedTop &&
+    sentenceDrift <= 2 &&
+    uniq.length >= 2 &&
+    dataFree === '1';
+
+  console.log(
+    `RESULT: ${ok ? 'PASS' : 'FAIL'}（横向锁死居中 + 纵向可拖且不越界 + 换句不漂移）`
+  );
   await ctx.close();
 })().catch((e) => {
   console.error('FATAL', e);
