@@ -500,6 +500,79 @@
     return playerRect() || viewportGeom();
   }
 
+  /**
+   * YouTube 自己的交互浮层（设置菜单、画质/倍速菜单、底部控制栏）。
+   *
+   * 字幕框是覆盖在播放器上的不透明浮层，压在设置菜单上时用户点不到
+   * 「清晰度」这类选项 —— 这是要避让的对象。
+   * 只收集**当前真的可见**的那些：YouTube 自动隐藏控制栏时会把
+   * opacity 压到 0（.ytp-autohide），这类跳过，否则鼠标一动就误判成重叠。
+   */
+  function ytUiRects() {
+    const out = [];
+    for (const sel of ['.ytp-settings-menu', '.ytp-popup', '.ytp-chrome-bottom']) {
+      for (const el of document.querySelectorAll(sel)) {
+        const cs = getComputedStyle(el);
+        if (cs.display === 'none' || cs.visibility === 'hidden' || Number(cs.opacity) < 0.05) continue;
+        const r = el.getBoundingClientRect();
+        if (r.width < 8 || r.height < 8) continue;
+        out.push(r);
+      }
+    }
+    return out;
+  }
+
+  /** 字幕框当前占的视口矩形（拿不到有效尺寸就返回 null） */
+  function boxViewportRect() {
+    const r = boxEl?.getBoundingClientRect?.();
+    if (!r || r.width < 4 || r.height < 4) return null;
+    return r;
+  }
+
+  /** 字幕框是否真的压住了 YouTube 的交互浮层（重叠要超过几个像素才算） */
+  function boxOverlapsYtUi() {
+    const b = boxViewportRect();
+    if (!b) return false;
+    for (const r of ytUiRects()) {
+      const w = Math.min(b.right, r.right) - Math.max(b.left, r.left);
+      const h = Math.min(b.bottom, r.bottom) - Math.max(b.top, r.top);
+      if (w > 6 && h > 6) return true;
+    }
+    return false;
+  }
+
+  /**
+   * 字幕框压住 YouTube 菜单时让路：加 .trace-dodge（点击穿透 + 淡出）。
+   *
+   * 为什么是「淡出」而不是「挪位置」：菜单的高度和位置随内容变化
+   * （设置 / 画质 / 倍速各不相同），挪到哪儿都可能又压住别的东西；
+   * 淡出则一定能看清菜单，且指针事件直通到菜单上，点击一定命中。
+   *
+   * 为什么必须节流：这里要读 getBoundingClientRect + getComputedStyle，
+   * 都会强制同步布局。tick() 是 60fps，每帧查一遍会拖慢播放器；
+   * 120ms 一次足够（菜单开合没人能察觉 0.12 秒延迟）。
+   *
+   * 只在**真的重叠**时生效 —— 不重叠时什么都不做，
+   * 字幕框外观与交互完全不变。
+   */
+  let lastDodge = false;
+  let lastDodgeAt = 0;
+  function syncDodge() {
+    if (!overlayEl) return;
+    const now = performance.now();
+    if (now - lastDodgeAt < 120) return;
+    lastDodgeAt = now;
+    // 正在拖动时绝不让路：让路会给字幕框加 pointer-events:none，
+    // 而拖拽依赖 pointer capture —— 中途把指针事件掐掉会让拖动卡在半路。
+    const dodge = !isGlobalBar()
+      && !overlayEl.classList.contains('trace-away')
+      && !boxEl?.classList.contains('trace-dragging')
+      && boxOverlapsYtUi();
+    if (dodge === lastDodge) return;
+    lastDodge = dodge;
+    overlayEl.classList.toggle('trace-dodge', dodge);
+  }
+
   /** 是否处于真·全屏（YouTube 会把 .ytp-fullscreen 加到播放器上） */
   function isFullscreen() {
     if (document.fullscreenElement) return true;
@@ -1224,6 +1297,9 @@
     // 放在 rAF 里做是因为 YouTube 的这些变化没有统一事件，而且 applyOverlayFrame
     // 内部有几何签名去重，没变化时只是一次字符串比较，开销可以忽略。
     applyOverlayFrame();
+    // 让路：YouTube 设置菜单弹出时，字幕框若压住它就淡出 + 点击穿透。
+    // 内部有 120ms 节流，不会每帧强制布局。
+    syncDodge();
     if (v && state.ready) {
       const s = S.findByTime(state.sentences, v.currentTime);
       const key = s ? s.start + '|' + s.text : '';

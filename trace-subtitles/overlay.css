@@ -45,6 +45,33 @@
   visibility: hidden;
 }
 
+/* 让路：字幕框压住了 YouTube 自己的设置菜单 / 画质菜单 / 控制栏。
+   字幕是覆盖在播放器上的不透明浮层，压在菜单上时用户点不到「清晰度」这类选项。
+
+   为什么淡出 + 点击穿透，而不是把字幕挪走：
+   菜单的尺寸和位置随内容变化（设置 / 画质 / 倍速各不相同），挪到哪儿都可能
+   又压住别的东西；淡出则一定能看清菜单，pointer-events:none 让指针直接落到
+   菜单上，点击必定命中。
+
+   只压低不透明度、不设 visibility:hidden —— 前者能保留过渡动画，
+   后者会立刻消失（菜单一开一关时画面会闪）。
+   pointer-events:none 是必须的：光看不见还不够，鼠标点在原位置仍会被
+   .trace-sub-box 截住，菜单照样点不动。 */
+#trace-sub-overlay.trace-dodge .trace-sub-box {
+  /* 0 而不是 0.06：留一点点不透明度会让字幕文字以「残影」形式浮在
+     菜单文字上面，看起来像渲染错误。要么看清字幕、要么完全让开。 */
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* 让路状态下手柄也要一起失效，否则鼠标停在字幕区上方
+   仍会弹出拖动手柄，而此刻用户是在操作菜单。 */
+#trace-sub-overlay.trace-dodge .trace-drag-handle {
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+}
+
 /* 全局显示：视频框不在视野里（切页面 / 翻到评论区），但视频还在放。
    这时字幕改成贴屏幕底部的悬浮条，尺寸与位置都不再跟视频框挂钩。
    用 fixed 而不是 absolute，因为此刻覆盖层本身贴的是整个视口；
@@ -97,7 +124,9 @@
   text-align: center;
   pointer-events: auto;
   box-shadow: 0 8px 30px rgba(0, 0, 0, .38);
-  transition: box-shadow .18s ease, background-color .18s ease;
+  /* opacity 进过渡列表是为了「让路」时淡出而不是瞬间消失 ——
+     瞬间消失会让人以为字幕丢了。 */
+  transition: box-shadow .18s ease, background-color .18s ease, opacity .14s ease;
 }
 
 /* 自由拖拽定位：由 JS 写 left（= 框的水平中心）/top。

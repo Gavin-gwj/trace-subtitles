@@ -99,6 +99,15 @@ function pageHtml(videoId = VIDEO_ID, opts = {}) {
   #movie_player video { position:absolute; inset:0; width:100%; height:100%;
     object-fit:contain; background:#000; }
   #movie_player canvas { position:absolute; inset:0; width:100%; height:100%; }
+  /* YouTube 自己的设置菜单（点齿轮弹出）：默认隐藏，位置贴近真实播放器的右下角。
+     它是「字幕框不该遮住」的那类交互浮层，测试用它验证避让。 */
+  .ytp-settings-menu { position:absolute; right:40px; bottom:70px; width:300px;
+    height:260px; background:rgba(28,28,28,.96); border-radius:12px; z-index:8;
+    display:none; padding:12px; box-sizing:border-box; }
+  .ytp-settings-menu .qbtn { display:block; width:100%; margin-top:8px; padding:10px;
+    background:#3a3a3a; color:#fff; border:0; border-radius:8px; font-size:14px;
+    cursor:pointer; }
+  .ytp-settings-menu .qbtn:hover { background:#4a4a4a; }
   .hint { position:fixed; left:12px; bottom:6px; color:#888; font-size:12px; z-index:2; }
 </style>
 </head>
@@ -107,6 +116,11 @@ function pageHtml(videoId = VIDEO_ID, opts = {}) {
     <video class="html5-main-video" muted playsinline></video>
     <canvas width="960" height="540"></canvas>
     <button class="ytp-subtitles-button" aria-pressed="false" style="position:absolute;left:8px;bottom:8px;z-index:5">CC</button>
+    <div class="ytp-settings-menu">
+      <div style="font-size:13px;color:#bbb">设置</div>
+      <button class="qbtn" id="qualityBtn">画质 · 自动 (2160p 4K)</button>
+      <button class="qbtn" id="speedBtn">播放速度 · 正常</button>
+    </div>
   </div>
   <div class="hint">Mock YouTube player · 0 – ${total.toFixed(1)}s captions · videoId=${videoId}${
     potMode ? ' · POT MODE (direct timedtext returns empty)' : ''
@@ -214,6 +228,22 @@ function pageHtml(videoId = VIDEO_ID, opts = {}) {
     /** 缩成右下角迷你播放器（模拟首页后台播放） */
     window.__mockMini = () => window.__mockFrame({
       left: window.innerWidth - 400 - 16, top: window.innerHeight - 225 - 16, width: 400, height: 225,
+    });
+
+    // ---- 模拟 YouTube 设置菜单的开合 ----
+    // 菜单弹出时字幕框若压在它上面，扩展应当让路（淡出 + 点击穿透），
+    // 让用户能点到「画质」这类选项。点击计数用来断言「真的点到了」。
+    const settingsMenu = document.querySelector('.ytp-settings-menu');
+    window.__mockMenuOpen = (on) => {
+      settingsMenu.style.display = on ? 'block' : 'none';
+      return settingsMenu.getBoundingClientRect();
+    };
+    window.__mockClicks = { quality: 0, speed: 0 };
+    document.getElementById('qualityBtn').addEventListener('click', () => {
+      window.__mockClicks.quality++;
+    });
+    document.getElementById('speedBtn').addEventListener('click', () => {
+      window.__mockClicks.speed++;
     });
   })();
 </script>

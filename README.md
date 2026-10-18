@@ -353,7 +353,7 @@ store），同一个视频二次打开不再请求网络。
 - **退化路径**：若引擎把哨兵全吃掉（例如 MyMemory），`usable` 判定失败 → 退回纯译文，
   中文不高亮但至少能读，不会显示乱码。
 
-### 过程中修掉的十五个真实 bug（值得记录）
+### 过程中修掉的十六个真实 bug（值得记录）
 
 **bug 1：跨消息传函数。** `content.js` 曾把 `hash: S.hash` 放进 `chrome.runtime.sendMessage`，
 而消息经过结构化克隆会丢掉函数，SW 侧抛 `TypeError: hashFn is not a function`。
@@ -912,6 +912,19 @@ function frameVisibility() {
 内联 `top` 压过 CSS `bottom` / 固定 profile 把上轮设置带进测试）与 8 项断言见
 [全局显示：视频不在眼前时，字幕该去哪儿](#全局显示视频不在眼前时字幕该去哪儿)。
 
+**bug 14：字幕框压住 YouTube 自己的设置菜单，用户点不到「清晰度」。**
+
+字幕框是覆盖在播放器上的不透明浮层，YouTube 的齿轮菜单从右下角弹出，长字幕正好
+压在上面。菜单是 `position:absolute` 的 DOM 元素，和字幕框抢同一块像素 —— 谁在上
+谁就吃掉点击。用户反馈：「翻译框会遮住 YouTube 页面原有的组件，例如清晰度等设置项，
+导致用户无法直接点击这些组件。」
+
+修复是**检测到重叠就淡出 + 点击穿透**（`ytUiRects()` / `boxOverlapsYtUi()` /
+`syncDodge()` + `.trace-dodge` 类），不是把字幕挪走 —— 菜单尺寸随内容变化，
+挪到哪儿都可能又压住别的东西。三个细节（不透明度必须为 0 不能留残影 / 必须跳过
+YouTube 自己隐藏的控制栏 / 不重叠时不能触发）与 7 项断言见
+[让路：字幕压住 YouTube 设置菜单时自动退开](#让路字幕压住-youtube-设置菜单时自动退开)。
+
 ### 词形归一化：收藏 beverage，也要高亮 beverages
 
 生词本里存的是**某个词形**，但视频里出现的可能是另一个。收藏 `beverage` 之后，
@@ -1240,6 +1253,105 @@ RESULT: PASS（全局显示悬浮条 + 离开画面自动隐藏 + 迷你播放�
 
 ---
 
+### 让路：字幕压住 YouTube 设置菜单时自动退开
+
+字幕框是覆盖在播放器上的不透明浮层。YouTube 的齿轮菜单从右下角弹出，
+长字幕正好压在上面 —— 用户点不到「画质 · 自动 (2160p 4K)」这类选项，
+截图里就是这个现象。菜单是 `position:absolute` 的 DOM 元素，和字幕框抢同一块
+像素，谁在上谁就吃掉点击。
+
+**做法：检测到重叠就淡出 + 点击穿透，而不是把字幕挪走。**
+
+```js
+/** YouTube 自己的交互浮层（设置菜单、画质/倍速菜单、底部控制栏） */
+function ytUiRects() {
+  const out = [];
+  for (const sel of ['.ytp-settings-menu', '.ytp-popup', '.ytp-chrome-bottom']) {
+    for (const el of document.querySelectorAll(sel)) {
+      const cs = getComputedStyle(el);
+      // 自动隐藏控制栏时 YouTube 把 opacity 压到 0，这类不算「挡着」
+      if (cs.display === 'none' || cs.visibility === 'hidden' || Number(cs.opacity) < 0.05) continue;
+      const r = el.getBoundingClientRect();
+      if (r.width < 8 || r.height < 8) continue;
+      out.push(r);
+    }
+  }
+  return out;
+}
+
+/** 字幕框是否真的压住了 YouTube 交互浮层（重叠超过 6px 才算） */
+function boxOverlapsYtUi() {
+  const b = boxViewportRect();
+  if (!b) return false;
+  for (const r of ytUiRects()) {
+    const w = Math.min(b.right, r.right) - Math.max(b.left, r.left);
+    const h = Math.min(b.bottom, r.bottom) - Math.max(b.top, r.top);
+    if (w > 6 && h > 6) return true;
+  }
+  return false;
+}
+```
+
+```css
+#trace-sub-overlay.trace-dodge .trace-sub-box {
+  opacity: 0;              /* 0 而不是 0.06，见下 */
+  pointer-events: none;    /* 光看不见不够，指针必须直通菜单 */
+}
+#trace-sub-overlay.trace-dodge .trace-drag-handle {
+  opacity: 0; visibility: hidden; pointer-events: none;
+}
+```
+
+`syncDodge()` 挂在 `tick()` 里（60fps），但有 **120ms 节流**：
+`getBoundingClientRect` + `getComputedStyle` 都强制同步布局，
+每帧查一遍会拖慢播放器；菜单开合没人能察觉 0.12 秒延迟。
+
+**为什么是淡出而不是挪位置**：菜单的尺寸和位置随内容变化（设置 / 画质 / 倍速
+各不相同），挪到哪儿都可能又压住别的东西；淡出则一定能看清菜单，
+`pointer-events:none` 让指针直接落到菜单上，点击必定命中。
+
+#### 三个细节
+
+1. **不透明度必须是 0，不能留一点点。** 第一版写 `0.06`，测试量到
+   `opacity: 0.06` 就判过了，但截图目视发现字幕文字仍以「残影」浮在菜单
+   文字上，像渲染错误。要么看清字幕、要么完全让开，中间态最难看。
+2. **必须跳过 YouTube 自己隐藏的浮层。** 自动隐藏控制栏时 YouTube 把
+   `.ytp-chrome-bottom` 的 `opacity` 压到 0 而 `display` 仍是 block；
+   若只判 `display`，鼠标一动就会被误判成「重叠」而让字幕闪一下。
+3. **只在真的重叠时生效。** 菜单开着但字幕被拖到画面上方时不触发，
+   否则用户一开菜单字幕就消失，明明什么都没挡住。
+4. **拖动进行中绝不让路。** 让路会给字幕框加 `pointer-events: none`，
+   而拖拽依赖 pointer capture —— 中途把指针事件掐掉，拖动会卡在半路。
+   `syncDodge()` 里显式排除 `trace-dragging` 状态，松手后下一轮（≤120ms）
+   若仍重叠才恢复让路。这条是主动加防护时发现的，不是用户报的。
+
+#### 回归实测（`node test-dodge.js`）
+
+测试夹具里加了一个 `.ytp-settings-menu`（右下角 300×260，含「画质」「播放速度」
+两个按钮，点击各自计数）与 `__mockMenuOpen(on)`。9 项断言：
+
+```
+✓ D1 菜单未开时字幕不让路        {dodge:false, opacity:1, pointer:"auto"}
+✓ D2 菜单与字幕确实重叠（前提成立） {overlapW:236, overlapH:126}
+✓ D3 重叠时字幕让路（淡出 + 点击穿透）{dodge:true, opacity:0, pointer:"none"}
+✓ D4 按钮被字幕盖住时仍能点到      {coversX:true, coversY:true, qualityClicks:1}
+✓ D5 菜单关闭后字幕恢复          {dodge:false, opacity:1, pointer:"auto"}
+✓ D6 菜单开着但没重叠时不让路      {overlapW:236, overlapH:-380, dodge:false}
+✓ D7 无 JS 错误                 {errors:[]}
+✓ D8 拖动中菜单弹出不会中断拖动    {midDragDodge:false, beforeTop:556, afterTop:396, movedUp:160}
+✓ D9 松手后若仍重叠则恢复让路      {dodge:true}
+RESULT: PASS（字幕框让路 YouTube 设置菜单：重叠时淡出可点，不重叠时不受影响）
+```
+
+D4 的构造花了两次才写对：第一版直接点按钮，但按钮中心其实在字幕框**外面**
+（只重叠了菜单左边缘 66px），点击本来就能命中 —— 这个断言等于没测。
+改成先把字幕拖到按钮所在高度、并把「按钮中心落在框内」一起断言，才有判别力。
+
+D8 也做了反向验证：临时删掉 `syncDodge()` 里的 `trace-dragging` 排除项，
+D8 立刻 FAIL（`midDragDodge: true`），说明它确实能抓住这个回归。
+
+---
+
 ## 三、安装与使用
 
 ### 加载扩展
@@ -1260,6 +1372,8 @@ RESULT: PASS（全局显示悬浮条 + 离开画面自动隐藏 + 迷你播放�
   字幕整条隐藏 —— 不会再有"在首页浏览时还有字幕飘在内容上"的情况
 - **全局显示（可选开关）**：打开后，视频框不在视野里时字幕改成一个贴屏幕底部的悬浮条
   （更小更实、不挡内容、没有拖动手柄）；迷你播放器在右下角时悬浮条自动让开那个小窗
+- **不挡 YouTube 自己的菜单**：字幕框压住齿轮菜单（画质 / 倍速）或控制栏时自动淡出并
+  让出点击，菜单关掉又恢复 —— 不会出现"想调清晰度却点不到"的情况
 - **显示模式**：双语 / 仅译文 / 仅原文
 - **目标语言**：简体中文、繁体中文、日、韩、英、法、德、西、俄、葡（10 种）
 - **翻译引擎**：Google（推荐，快）/ MyMemory（备用）
@@ -1319,6 +1433,7 @@ node test-settings.js        # MyMemory 额度降级 + 引擎切换缓存 + 免�
 node test-forms.js           # 词形归一化：收藏 beverage 也高亮 beverages，点复数开同一词条
 node test-backup.js          # 生词本写本机文件 + 卸载重装后恢复 + 合并保留学习进度
 node test-global.js          # 全局显示悬浮条 + 离开画面自动隐藏 + 迷你播放器不贴小窗
+node test-dodge.js           # 字幕压住 YouTube 设置菜单时让路（淡出 + 点击穿透）
 ```
 
 `tools/mock/` 用 Playwright `page.route()` 整体伪造 `https://www.youtube.com/**`，
@@ -1451,6 +1566,7 @@ D:\MyFiles\项目\Trace\
    ├─ test-forms.js             词形归一化回归（单复数同高亮 + 两份实现一致性）
    ├─ test-backup.js            生词本落盘回归（写文件/卸载恢复/合并进度/自选目录）
    ├─ test-global.js            全局显示悬浮条 + 离开画面隐藏 + 迷你播放器避让
+   ├─ test-dodge.js             字幕压住设置菜单时让路（淡出 + 点击穿透）
    ├─ probe-ext2\               主世界 vs 隔离世界对照实验
    ├─ probe-transcript.js       get_transcript 接口探针
    ├─ gen-icons.js              纯 Node 生成 PNG 图标
@@ -1467,6 +1583,8 @@ D:\MyFiles\项目\Trace\
    ├─ shot-glass.png            毛玻璃 + 3 点拖动胶囊截图
    ├─ shot-forms.png            复数形式高亮 + 单数词卡截图
    ├─ shot-global.png           全局显示悬浮条（避开右下角迷你播放器）截图
+   ├─ shot-dodge.png            菜单开着但字幕已挪开：不让路，字幕清晰
+   ├─ shot-dodge-overlap.png    字幕压住菜单：完全淡出，菜单可读可点
    ├─ test-settings.js          MyMemory 降级 / 引擎切换缓存 / 自动出字幕回归
    ├─ shot-settings.png         自动出字幕截图（未点插件）
    ├─ shot-backup.png           词库页备份区截图（选目录 + 自动备份开关）
