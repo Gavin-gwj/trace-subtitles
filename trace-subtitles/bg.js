@@ -412,10 +412,26 @@ function llmOriginOf(baseUrl) {
   }
 }
 
+/** 当前是否已授予该地址的 host permission（popup 用来判断要不要提示重新授权） */
+async function llmHasPermission(baseUrl) {
+  const origin = llmOriginOf(baseUrl);
+  if (!origin) return false;
+  try {
+    return await chrome.permissions.contains({ origins: [origin + '/*'] });
+  } catch (_) {
+    return false;
+  }
+}
+
 /** 调一次 chat/completions，返回纯文本回复 */
 async function llmChat(messages, st) {
   const s = st || (await getSettings());
   if (!llmReady(s)) throw new Error('llm not configured');
+  // 先确认 host permission：没有权限时 fetch 只会抛 "Failed to fetch"，
+  // 完全看不出是权限问题。这里给一句能直接照做的报错。
+  if (!(await llmHasPermission(s.llmBaseUrl))) {
+    throw new Error('未授权访问该 API 地址，请在弹窗里点一次「测试连接」授权');
+  }
   const timeout = Math.max(3000, Number(s.llmTimeoutMs) || 30000);
   const headers = { 'content-type': 'application/json' };
   const key = String(s.llmApiKey || '').trim();
@@ -551,6 +567,9 @@ async function llmTranslateAll(texts, source, target) {
 async function llmListModels() {
   const st = await getSettings();
   if (!String(st.llmBaseUrl || '').trim()) throw new Error('请先填写 API 地址');
+  if (!(await llmHasPermission(st.llmBaseUrl))) {
+    throw new Error('未授权访问该 API 地址，请点一次「测试连接」授权');
+  }
   const headers = {};
   const key = String(st.llmApiKey || '').trim();
   if (key) headers.authorization = 'Bearer ' + key;
@@ -1855,29 +1874,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           sendResponse({ ok: true, data: await getSettings() });
           break;
         case 'settings:set':
-          {
-            // 大模型地址是用户自填的任意域名，MV3 要求 host permission 覆盖才能 fetch。
-            // optional_host_permissions 只声明了 "https://*/*"，所以真正请求前
-            // 必须显式申请该 origin —— 否则 fetch 直接抛 TypeError: Failed to fetch，
-            // 用户只会看到"连接失败"，完全猜不到是权限问题。
-            const patch = msg.patch || {};
-            if (typeof patch.llmBaseUrl === 'string') {
-              const origin = llmOriginOf(patch.llmBaseUrl);
-              if (origin) {
-                try {
-                  const has = await chrome.permissions.contains({ origins: [origin + '/*'] });
-                  if (!has) {
-                    // 必须由用户手势触发；popup 里点「测试连接/拉取模型」正是手势。
-                    // 失败也不阻塞保存设置 —— 只是后面请求会失败并给出明确报错。
-                    await chrome.permissions.request({ origins: [origin + '/*'] });
-                  }
-                } catch (e) {
-                  console.warn('[Trace bg] 申请大模型域名权限失败', e && e.message);
-                }
-              }
-            }
-            sendResponse({ ok: true, data: await setSettings(patch) });
-          }
+          // 注意：这里**不能**申请 host permission。
+          // chrome.permissions.request 必须在用户手势里调用，而消息处理器
+          // 没有手势上下文，Chrome 会直接抛 "This function must be called
+          // during a user gesture"。权限申请在 popup 的「拉取模型/测试连接」
+          // 点击处理器里做（那里是真手势）。
+          sendResponse({ ok: true, data: await setSettings(msg.patch || {}) });
           break;
         case 'translate':
           sendResponse({

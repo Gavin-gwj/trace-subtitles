@@ -108,6 +108,40 @@ function syncLlmGroup() {
   $('llmGroup').style.display = $('engine').value === 'llm' ? '' : 'none';
 }
 
+/** 从地址取 origin（scheme://host[:port]），取不到返回 '' */
+function originOf(baseUrl) {
+  const s = String(baseUrl || '').trim();
+  if (!s) return '';
+  try {
+    return new URL(/^https?:\/\//i.test(s) ? s : 'https://' + s).origin;
+  } catch (_) {
+    return '';
+  }
+}
+
+/**
+ * 申请大模型域名的 host permission。
+ *
+ * 必须**在用户手势里同步调用**：chrome.permissions.request 会拒绝任何
+ * 脱离手势的调用（"This function must be called during a user gesture"）。
+ * 之前这段逻辑写在 bg.js 的 'settings:set' 处理器里 —— 消息处理器没有手势
+ * 上下文，Chrome 直接拒绝，权限永远拿不到，fetch 只会报 "Failed to fetch"，
+ * 用户完全猜不到是权限问题。
+ *
+ * 因此调用方要在 click 处理器里**第一件事**就调它，中间不能有 await。
+ */
+function requestLlmOrigin(baseUrl) {
+  const origin = originOf(baseUrl);
+  if (!origin) return Promise.resolve({ ok: false, err: '请先填写 API 地址' });
+  // 已授权时 request 立即 resolve(true)，不会弹框，可以无脑调用
+  return chrome.permissions
+    .request({ origins: [origin + '/*'] })
+    .then((granted) =>
+      granted ? { ok: true, origin } : { ok: false, err: `未授权访问 ${origin}` }
+    )
+    .catch((e) => ({ ok: false, err: String((e && e.message) || e) }));
+}
+
 async function saveSettings(patch, retranslate = false) {
   const r = await chrome.runtime.sendMessage({ type: 'settings:set', patch });
   const settings = r && r.ok ? r.data : null;
@@ -173,7 +207,15 @@ function initSettingsUI() {
     const btn = $('llmFetch');
     btn.disabled = true;
     btn.textContent = '拉取中…';
-    // 先把当前输入落盘，后台读的是存储里的值
+    // 权限申请必须紧跟点击（手势还没失效），所以放在最前面、前面不能有 await
+    const perm = await requestLlmOrigin($('llmBaseUrl').value);
+    if (!perm.ok) {
+      $('llmHint').textContent = '需要先授权访问该地址：' + perm.err;
+      btn.disabled = false;
+      btn.textContent = '拉取模型列表';
+      return;
+    }
+    // 再把当前输入落盘，后台读的是存储里的值
     await saveSettings({
       llmBaseUrl: $('llmBaseUrl').value.trim(),
       llmApiKey: $('llmApiKey').value.trim(),
@@ -203,6 +245,14 @@ function initSettingsUI() {
     const btn = $('llmTest');
     btn.disabled = true;
     btn.textContent = '测试中…';
+    // 同 llmFetch：手势里第一件事就申请权限
+    const perm = await requestLlmOrigin($('llmBaseUrl').value);
+    if (!perm.ok) {
+      $('llmHint').textContent = '需要先授权访问该地址：' + perm.err;
+      btn.disabled = false;
+      btn.textContent = '测试连接';
+      return;
+    }
     await saveSettings({
       llmBaseUrl: $('llmBaseUrl').value.trim(),
       llmApiKey: $('llmApiKey').value.trim(),

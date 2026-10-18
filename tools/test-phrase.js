@@ -386,9 +386,29 @@ function check(name, ok, extra) {
   check('L16 短语抽屉显示误听提示', /fare/.test(drawer.note), drawer.note);
 
   // ---- L17~L20：大模型引擎 ----
-  // 配置指向本地假服务。setSettings 会尝试申请 host permission，
-  // 但 Playwright 里没有用户手势，所以可能被拒 —— 这不影响测试，
-  // 因为 route 拦截在浏览器层面生效，不需要真实网络权限。
+  // 配置指向本地假服务。注意 host permission 必须真的授予：bg.js 的 llmChat /
+  // llmListModels 会先检查 chrome.permissions.contains，没有权限直接抛
+  // 「未授权访问该 API 地址」，根本不会走到 fetch（这是 bug 17 的修复）。
+  // 而 permissions.request 只能在用户手势里调用，SW 里调必被拒 ——
+  // 所以借一个扩展页面（有真实点击手势）去申请，再回 SW 里跑。
+  {
+    const permPage = await ctx.newPage();
+    await permPage.goto(`chrome-extension://${extId}/popup.html`, { waitUntil: 'domcontentloaded' });
+    await permPage.evaluate(
+      () =>
+        new Promise((res) => {
+          chrome.permissions
+            .request({ origins: ['https://llm.test/*'] })
+            .then((g) => res(g), () => res(false));
+        })
+    );
+    await permPage.close();
+    const granted = await sw.evaluate(() =>
+      chrome.permissions.contains({ origins: ['https://llm.test/*'] })
+    );
+    check('L16b 大模型域名权限已授予（否则走不到 fetch）', granted === true, { granted });
+  }
+
   await sw.evaluate(async () => {
     await globalThis.__traceDebug.setSettings({
       llmBaseUrl: 'https://llm.test/v1',

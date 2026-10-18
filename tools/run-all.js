@@ -21,6 +21,7 @@ const SUITES = [
   'test-dict.js',
   'test-phrase.js',
   'test-invisible.js',
+  'test-llm.js',
 ];
 
 const results = [];

@@ -353,7 +353,7 @@ store），同一个视频二次打开不再请求网络。
 - **退化路径**：若引擎把哨兵全吃掉（例如 MyMemory），`usable` 判定失败 → 退回纯译文，
   中文不高亮但至少能读，不会显示乱码。
 
-### 过程中修掉的十八个真实 bug（值得记录）
+### 过程中修掉的十九个真实 bug（值得记录）
 
 **bug 1：跨消息传函数。** `content.js` 曾把 `hash: S.hash` 放进 `chrome.runtime.sendMessage`，
 而消息经过结构化克隆会丢掉函数，SW 侧抛 `TypeError: hashFn is not a function`。
@@ -997,6 +997,91 @@ function looseWordRe(word, flags = 'gi') {
 注意 `S2b`（译文里没有残留的英文原词）**在旧代码上也是 PASS** ——
 因为 `/horizontal/` 本来也匹配不到 `horizo\u200B\u200Bntal`。这条断言没有判别力，
 真正的判别力在 `S2`（检查有没有零宽字符本身）。
+
+**bug 17：大模型「拉取模型列表」永远失败，报 `Failed to fetch`。**
+
+现象（用户截图）：地址 `https://api2.xxx/v1`、密钥都填对了，点「拉取模型列表」
+却只回一句 `Failed to fetch` —— 这行字对用户毫无指向性，像是网络问题，于是反复
+检查地址和密钥。
+
+真实原因完全在别处。`llmBaseUrl` 是用户自填的任意域名，`manifest.json` 里无法静态
+声明，只能靠 `optional_host_permissions` + 运行时 `chrome.permissions.request()`。
+而这行代码当时写在 `bg.js` 的 `'settings:set'` 消息处理器里：
+
+```
+permissions.request from SW: {"ok":false,"err":"This function must be called during a user gesture"}
+```
+
+`chrome.permissions.request()` **必须在用户手势的同步调用栈里**执行。service worker
+的消息处理器由 `sendMessage` 触发，没有任何手势上下文，Chrome 直接拒绝。权限永远
+拿不到 → `fetch` 打到未授权域名 → 只报 `Failed to fetch`。
+
+更隐蔽的是：失败被 `try/catch` 吞成一行 `console.warn`，主流程照常保存设置，
+所以「保存成功」和「请求失败」同时成立，用户完全没有线索。
+
+修复分三处：
+
+1. **申请挪到手势里**（`popup.js`）——在「拉取模型列表」「测试连接」两个 click
+   处理器里，**第一件事**就调 `requestLlmOrigin()`，之前不能有任何 `await`：
+
+   ```js
+   $('llmFetch').addEventListener('click', async (ev) => {
+     ev.preventDefault();
+     // 权限申请必须紧跟点击（手势还没失效），所以放在最前面、前面不能有 await
+     const perm = await requestLlmOrigin($('llmBaseUrl').value);
+     if (!perm.ok) { /* 明确提示需要授权 */ return; }
+     …
+   });
+   ```
+
+   已授权时 `request()` 立即 resolve(`true`) 且不弹框，所以无脑调用没有副作用。
+
+2. **`bg.js` 里那段删掉**，并留注释说明为什么不能放这里 —— 否则下一个人会「顺手
+   补回来」。
+
+3. **失败时报出真正的原因**。`llmChat()` / `llmListModels()` 在 `fetch` 之前先
+   `chrome.permissions.contains()` 自检，没有权限就抛
+   `未授权访问该 API 地址，请在弹窗里点一次「测试连接」授权`。
+   这句报错**直接告诉用户该点哪里**，而不是让他去猜 `Failed to fetch`。
+
+**回归测试（`tools/test-llm.js`，11 项）**。它跑真实弹窗页面、点真实按钮，
+所以走的是真实手势路径：
+
+```
+✓ P0 起始状态未授权（否则测不出权限 bug） {"removed":true,"still":false}
+✓ P1 选中「大模型」后配置区展开
+✓ P2 点「拉取模型列表」能拿到模型 {"hint":"共 3 个模型，选一个即可",…}
+✓ P3 模型列表内容正确 {"opts":["fake-alpha","fake-beta","fake-gamma"]}
+✓ P4 点击后该域名权限已授予 {"permGranted":true}
+✓ P5 点「测试连接」返回连接正常 {"hint":"连接正常（4ms）：【LLM】这是大模型译文"}
+✓ P6 测试连接真的发出了请求 {"chatHits":1}
+✓ P7 请求带了配置的模型名 {"model":"fake-beta"}
+✓ P8 权限到位后后台能调通大模型 {"ok":true,"out":[…]}
+✓ P9 大模型译文非空
+✓ P10 无 JS 错误 {"errors":[]}
+```
+
+`P0` 是这次特意加的：**权限是持久化的**，上一轮跑过之后 `https://llm.test/*` 仍是
+已授权状态，`fetch` 能直接成功 —— 那样这个测试就抓不到 bug 了。第一次跑
+`test-llm.js` 时正是因为残留授权而「虚假通过」，加上 `permissions.remove()` 复位
+后才是真测试。
+
+反向验证：把 `popup.js` 里两处 `requestLlmOrigin()` 调用删掉（模拟修复前的代码），
+`P2`/`P3`/`P4` 立刻 FAIL，且提示变成新的可操作文案：
+
+```
+✗ P2 点「拉取模型列表」能拿到模型 {"hint":"未授权访问该 API 地址，请点一次「测试连接」授权"}
+✗ P4 点击后该域名权限已授予 {"permGranted":false}
+```
+
+`test-phrase.js` 也补了 `L16b`。它原来靠 `ctx.route()` 在浏览器层面拦截，注释里
+写着「不需要真实网络权限」—— 这在 bug 17 之后不成立了，因为 `llmChat()` 会先
+`permissions.contains()` 自检，没权限根本走不到 `fetch`，`ctx.route()` 也就没机会
+生效。现在改为先开一个扩展页面（有真实手势）授予权限，再回 SW 里跑：
+
+```
+✓ L16b 大模型域名权限已授予（否则走不到 fetch） {"granted":true}
+```
 
 ### 词形归一化：收藏 beverage，也要高亮 beverages
 
@@ -1680,12 +1765,17 @@ function looksLiteral(whole, literal) {
 实测（假模型）能拿到「付钱」而不是「支付你的公平」。
 
 **权限**：`llmBaseUrl` 可以是任意域名，无法在 `manifest.json` 里静态声明。
-用 `optional_host_permissions: ["<all_urls>"]` + 运行时 `chrome.permissions.request()`
-在用户保存配置时申请。测试里通过 `chrome.permissions.contains()` 验证过。
+用 `optional_host_permissions: ["<all_urls>"]` + 运行时 `chrome.permissions.request()`。
 
-**`test-phrase.js` 的三条大模型断言**（用 `ctx.route()` 伪造 `/chat/completions`）：
+**申请必须发生在用户手势里**（见 bug 17）：写在 popup 的「拉取模型列表 / 测试连接」
+click 处理器里，且前面不能有 `await`。SW 的消息处理器里调会被 Chrome 拒绝
+（`This function must be called during a user gesture`），权限永远拿不到，
+`fetch` 只会报 `Failed to fetch`。
+
+**`test-phrase.js` 的五条大模型断言**（用 `ctx.route()` 伪造 `/chat/completions`）：
 
 ```
+✓ L16b 大模型域名权限已授予（否则走不到 fetch） {"granted":true}
 ✓ L17 能拉取模型列表 {"ok":true,"data":["fake-1","fake-2"]}
 ✓ L18 大模型引擎能翻出译文 ["现在就支付你的公平。","祝你今天过得愉快。"]
 ✓ L19 请求里带了模型名与 system 提示 {"model":"fake-1","n":2}
@@ -1694,6 +1784,9 @@ function looksLiteral(whole, literal) {
 
 L20 是这里最重要的一条：让伪造端点返回 500，断言仍有译文 ——
 证明降级链真的接上了，而不是"配了大模型就再也翻不出来"。
+
+L16b 是 bug 17 之后补的：`ctx.route()` 只在浏览器网络层拦截，而 `llmChat()`
+会先 `permissions.contains()` 自检，没权限连 `fetch` 都不会发，拦截也就没机会生效。
 
 ---
 
@@ -1788,6 +1881,7 @@ node test-dodge.js           # 字幕压住 YouTube 设置菜单时让路（淡�
 node test-dict.js            # 查词卡片中文优先（词性中文 + 释义中文化 + 语境义）
 node test-phrase.js          # 短语整段释义 + 短语生词本 + 大模型引擎与降级
 node test-invisible.js       # 译文里不残留英文（Google 会插零宽空格破坏匹配）
+node test-llm.js             # 大模型配置：手势里申请权限 + 拉模型 + 测试连接 + 后台可用
 node run-all.js              # 一次跑完以上全部，末尾输出 PASS/FAIL 汇总
 ```
 
@@ -1925,6 +2019,7 @@ D:\MyFiles\项目\Trace\
 ├─ test-dict.js              查词卡片中文优先（词性中文 + 释义中文化 + 语境义）
 ├─ test-phrase.js            短语整段释义 + 短语生词本 + 大模型引擎与降级
 ├─ test-invisible.js         译文里不残留英文（零宽空格破坏匹配）
+├─ test-llm.js               大模型配置：手势里申请权限 + 拉模型 + 测试连接 + 后台可用
 ├─ run-all.js                一次跑完全部回归，输出汇总表
 ├─ shot-dict.png             查词卡片：本句译作「立即」与单词直译「立即地」并存
 ├─ shot-phrase.png           短语卡：警示条 + 降级释义 + 逐词对照
