@@ -188,8 +188,8 @@ AI 总结
 |---|---|
 | `manifest.json` | MV3 声明；两组 content_scripts（主世界 + 隔离世界）；host 权限只开 4 个域 |
 | `main-world.js` | 跑在页面主世界：读 `getPlayerResponse()` / `getOption('captions','tracklist')`，`fetch` 字幕正文，`postMessage` 桥接 |
-| `subtitles.js` | 纯函数库：`parse()`（json3/srv3）、`segment()`（智能分句）、`hash()`、`findByTime()`、`wordForms()`（词形归一化） |
-| `content.js` | 隔离世界主控：轨道选择、批量翻译、双层字幕渲染、rAF 推进、点词、查词弹窗、生词高亮（含词形变化）、悬浮按钮与页内面板 |
+| `subtitles.js` | 纯函数库：`parse()`（json3/srv3）、`segment()`（智能分句）、`splitLong()`（超长句二次切分）、`hash()`、`findByTime()`、`wordForms()`（词形归一化） |
+| `content.js` | 隔离世界主控：轨道选择、批量翻译、双层字幕渲染（含 `fitToFrame()` 自适应缩小）、rAF 推进、点词、查词弹窗、生词高亮（含词形变化）、悬浮按钮与页内面板 |
 | `bg.js` | Service Worker：设置、翻译（Google + MyMemory 降级）、词典、IndexedDB 缓存与生词本、哨兵对齐（`markWords` / `parseMarked`）、**备份/恢复落盘** |
 | `overlay.css` | 字幕覆盖层 + 查词弹窗 + 悬浮按钮 + 页内设置面板样式 |
 | `theme.css` | **共享设计系统**（墨黑分层底 + 暖金强调 + 字体/圆角/按钮/卡片原子类），被 popup 与词库页共用 |
@@ -235,10 +235,47 @@ window.ytInitialPlayerResponse.captions…              // 兜底 2
 
 - 收句条件：句末标点 `SENT_END = /[.!?。！？…]["'”’)）\]]*\s*$/`
 - 边界条件：与上一片的时间间隔 `gap > 2.0s` 也强制断开
-- 超长保护：`maxLen = 180` 字符，超出则在最近的逗号处断
+- 超长保护：`maxLen = 120` 字符，超出交给 `splitLong()` 二次切分（见下）
 - 处理 YouTube 自动字幕的典型脏数据：碎片无标点、首字母小写、重复滚动行
 
-实测把测试夹具的 **13 行碎片 → 5 个完整句子**，译文连贯。
+实测把测试夹具的 **13 行碎片 → 6 个句子**，最长 111 字符，译文连贯。
+
+**超长句二次切分（`splitLong()`）**
+
+`maxLen` 从 180 收到 120 是踩了实际观感之后的决定：180 时字幕框最宽可到
+1180px，一句 130 字符的英文能撑满两行、配上中文三行，整个框能占到画面高度的
+40%（截图里那句 Emirates 头等舱的字幕就是这种情况）。收到 120 后，多数长句会在
+逗号处断成两段，每段一行。
+
+`splitLong()` 不是"按 120 硬切"，因为硬切会把词切两半、也会切出
+`not each fragment.` 这种 18 字符的孤儿片段，单独闪一下反而更打断阅读。它的做法：
+
+1. 先算需要几段 `n = ceil(len / maxLen)`，再按 `n` 均分得到 `target`；
+2. 在 `target` 附近（±35%）找断点，**优先断在逗号/分号后面** —— 断在标点处的语义完整性最好；
+3. 范围内没有标点就找**最近**的空格（不是最靠后的空格 —— 取最靠后会切出超过
+   `maxLen` 的长段，等于白拆。第一版就犯了这个错，实测切出 134 字符的段）；
+4. 整段没空格（极端 ASR 产物）才硬切，否则会死循环；
+5. 尾巴短于 26 字符就并回上一段，宁可上一段略长，也不要单独闪一个短片段。
+
+切段后时间轴按字符数比例分配，否则 `findByTime()` 只会命中第一段，后面几段永远
+显示不出来。
+
+**自适应缩小（`fitToFrame()`）**
+
+拆分不是万能的：用户可以把字号调到 48px，全屏时还有 `--trace-vscale` 放大。
+所以再加一道兜底 —— 量出字幕框的自然高度，超过画面高度 55% 就按超出比例缩小
+`--trace-fit`（CSS 里与 `--trace-font-scale`、`--trace-vscale` 相乘），下限 0.62。
+再小就不可读了，那时宁可让框超出也不缩成蚂蚁字。
+
+实测三组（1440×900 画面、190 字符长句）：
+
+| 场景 | 框高 | 占画面 | `--trace-fit` |
+|---|---|---|---|
+| 修复前（`maxLen=180`，无切分） | 171px | 19.0% | — |
+| 修复后（`maxLen=120` + 切分） | 103px | 11.4% | 1（无需缩小） |
+| 修复后 + 字号 48px/缩放 1.6 | 498px | 55.3% | 0.936（兜底生效） |
+
+关键数字：修复后长句与短句的框高**都是 103px**，即框高不再随句长变化。
 
 **③ 翻译引擎：Google 免费端点的正确用法**
 
@@ -316,7 +353,7 @@ store），同一个视频二次打开不再请求网络。
 - **退化路径**：若引擎把哨兵全吃掉（例如 MyMemory），`usable` 判定失败 → 退回纯译文，
   中文不高亮但至少能读，不会显示乱码。
 
-### 过程中修掉的十三个真实 bug（值得记录）
+### 过程中修掉的十四个真实 bug（值得记录）
 
 **bug 1：跨消息传函数。** `content.js` 曾把 `hash: S.hash` 放进 `chrome.runtime.sendMessage`，
 而消息经过结构化克隆会丢掉函数，SW 侧抛 `TypeError: hashFn is not a function`。
@@ -426,8 +463,8 @@ function clampCenterX(cx) {
 // 拖动时、以及 renderActive() 每次换句后都调一次
 ```
 
-回归测试 `tools/test-center.js` 实测：短句 762px / 长句 1232px，两者中心都是 620px，
-`driftPx: 0`；拖到最左边时 `leftEdge: 4`，正确被夹在视口内。
+回归测试 `tools/test-center.js` 实测：短句 323px / 长句 1232px，两者中心都是 640px，
+`sentenceDrift: 0`；拖到最上边时 `topAfterDragUp: 29`，正确被夹在画面内。
 
 > **后续修正**：这套"按中心点定位 + 夹紧"的方案后来整个被替换了。
 > 用户要求对齐 Trancy 的行为 —— **只能上下移动，横向固定居中**。
@@ -811,6 +848,31 @@ B 用例能测出问题，靠的是**给两个引擎不同的可辨识输出**�
 早期版本里 MyMemory 降级到 Google、两边输出一模一样，这个断言其实**永远为真**，
 测不出任何东西 —— 这是写降级链测试时最容易踩的坑。
 
+**D. 长句不折行 → 字幕框吃掉了半个画面。**
+
+这不是"译文太长"的问题，而是分句阶段压根没管长度：`maxLen` 是 180 字符，而
+190 字符的句子在 180 的阈值下正好逃过一次切分，于是一整句英文撑满两行、
+配上中文三行，框高 171px（占 900px 画面的 19%）。截图里那句
+`smallest road legal car ever made. So, naturally, as an adult with free will...`
+就是这种情况 —— 一屏字幕盖掉近四分之一画面。
+
+修复分两层，因为单靠哪一层都不够：
+
+1. **`maxLen` 180 → 120，并加 `splitLong()` 二次切分**。多数长句会在逗号处断成两段，每段一行。
+2. **`fitToFrame()` 兜底**。用户能把字号调到 48px，全屏还有 `--trace-vscale` 放大，
+   拆分拦不住。量出框高超过画面 55% 就按比例缩 `--trace-fit`（下限 0.62）。
+
+实测三组（同一句 190 字符）：
+
+| 场景 | 框高 | 占画面 | `--trace-fit` |
+|---|---|---|---|
+| 旧（`maxLen=180`，无切分） | 171px | 19.0% | — |
+| 新（`maxLen=120` + 切分） | 103px | 11.4% | 1（无需缩小） |
+| 新 + 字号 48px/缩放 1.6 | 498px | 55.3% | 0.936（兜底生效） |
+
+修复后长句与短句的框高**都是 103px** —— 框高不再随句长变化，这才是目标。
+只把 `maxLen` 调小不够：不切分的话 130 字符的句子照样能撑满两行。
+
 ### 词形归一化：收藏 beverage，也要高亮 beverages
 
 生词本里存的是**某个词形**，但视频里出现的可能是另一个。收藏 `beverage` 之后，
@@ -1039,6 +1101,8 @@ RESULT: PASS（生词本写成本机文件 + 卸载重装后可恢复 + 合并�
 ### 功能
 
 - **双语字幕**：原文 + 译文双层，随播放高亮推进
+- **长句自动折行**：单句超过 120 字符会在逗号处断成多段，每段一行；框高因此稳定在两行左右，
+  不再出现"一屏字幕吃掉四分之一画面"。字号调到极大时还有自适应缩小兜底
 - **字幕贴视频画面**（不是贴浏览器窗口）：非全屏时精确落在播放器矩形内，影院模式 / 顶栏折叠 /
   改窗口大小都跟着走；**全屏时按画面宽度等比放大字号与行宽**，退出全屏又等比缩回
 - **显示模式**：双语 / 仅译文 / 仅原文
@@ -1114,21 +1178,21 @@ node test-backup.js          # 生词本写本机文件 + 卸载重装后恢复 
 ```
 ✓ 双语字幕渲染成功: orig="So today we are going to talk about how this plugin works."
                     trans="那么今天我们就来谈谈这个插件是如何工作的。"
-segmentation: { rows: 13, sentences: 5 }
+segmentation: { rows: 13, sentences: 6 }
 word popup:   { word:"So", zh:"所以", hasAddBtn:true }
 add button:   "✓ 已在生词本"   (btnAct: remove)
 wordbook:     [{ word:"so", zh:"所以", context:"So today we are going to talk about…",
                  videoId:"TESTID00001", time:0 }]
 highlight:    { found:true, hasSavedClass:true, savedCount:1 }
 reopen popup: { btnText:"✓ 已在生词本", btnAct:"remove" }
-checks:       subs=true seg=5 highlight=true reopen=true
+checks:       subs=true seg=6 highlight=true reopen=true
 RESULT: PASS
 ```
 
 pot 模式回归：
 
 ```
-[Trace] 已加载 13 行字幕 → 5 句（English，来源 hook）
+[Trace] 已加载 13 行字幕 → 6 句（English，来源 hook）
 timedtext hits: [{ hasPot: true, pot: "MOCK_POT_TOKEN" }]
 RESULT: PASS (网络钩子成功绕过 pot 限制)
 ```
@@ -1210,7 +1274,7 @@ D:\MyFiles\项目\Trace\
 ├─ trace-subtitles\             ← 复刻的扩展（加载这个目录）
 │  ├─ manifest.json
 │  ├─ main-world.js             主世界：读播放器 / 网络钩子 / 抓字幕（五级降级）
-│  ├─ subtitles.js              解析 + 智能分句
+│  ├─ subtitles.js              解析 + 智能分句 + 超长句切分 + 词形归一化
 │  ├─ content.js                渲染 / 交互 / 页内面板 / DOM 兜底
 │  ├─ bg.js                     SW：翻译 / 词典 / IndexedDB
 │  ├─ overlay.css               字幕 / 查词卡 / 悬浮按钮 / 页内面板

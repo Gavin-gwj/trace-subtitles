@@ -16,6 +16,9 @@
   --trace-vscale: 1;
   /* 页内设置面板在覆盖层坐标系里占掉的右侧宽度（px），由 JS 实测写入 */
   --trace-panel-reserve: 0px;
+  /* 超长句的自适应缩小系数（0.62~1），由 content.js 的 fitToFrame() 写入。
+     与 --trace-font-scale 相乘，用户设的字号仍是基准。 */
+  --trace-fit: 1;
   /* 覆盖层不再贴满视口，而是精确覆盖视频框：JS 写 left/top/width/height。
      这样字幕的百分比位置、最大宽度都相对视频，而不是相对浏览器窗口。 */
   position: fixed;
@@ -144,7 +147,7 @@
 }
 
 #trace-sub-overlay .trace-sub-orig {
-  font-size: calc(var(--trace-orig-size) * var(--trace-font-scale) * var(--trace-vscale));
+  font-size: calc(var(--trace-orig-size) * var(--trace-font-scale) * var(--trace-vscale) * var(--trace-fit));
   line-height: 1.34;
   color: var(--trace-orig-color);
   font-weight: 600;
@@ -155,7 +158,7 @@
 
 #trace-sub-overlay .trace-sub-trans {
   margin-top: 7px;
-  font-size: calc(var(--trace-trans-size) * var(--trace-font-scale) * var(--trace-vscale));
+  font-size: calc(var(--trace-trans-size) * var(--trace-font-scale) * var(--trace-vscale) * var(--trace-fit));
   line-height: 1.45;
   color: var(--trace-trans-color);
   font-weight: 400;

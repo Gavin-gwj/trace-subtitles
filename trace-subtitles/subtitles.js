@@ -13,6 +13,67 @@
 
   const SENT_END = /[.!?。！？…]["'”’)）\]]*\s*$/;
   const CLAUSE_END = /[,;:，；：、]\s*$/;
+  /** 拆分后每段的最小长度，太短的尾巴（"not each fragment."）要并进相邻段 */
+  const MIN_PART = 26;
+
+  /**
+   * 把一句太长的文本切成若干段，每段尽量不超过 maxLen。
+   *
+   * 为什么不用「按 maxLen 硬切」：硬切会把词切两半、也会切出 "not each
+   * fragment." 这种 18 字符的孤儿片段，单独闪一下反而更打断阅读。
+   * 所以先算需要几段（n），再按 n 均分（target），并在接近 target 时
+   * 优先断在逗号/分号后面 —— 断在标点处的语义完整性最好。
+   */
+  function splitLong(text, maxLen) {
+    const t = String(text || '').trim();
+    if (!t || t.length <= maxLen) return [{ text: t }];
+
+    const n = Math.ceil(t.length / maxLen);
+    const target = Math.ceil(t.length / n);
+
+    // 先找标点位置（逗号类），断点优先落在这些位置之后
+    const clauseAt = [];
+    const reClause = /[,;:，；：、]\s+/g;
+    let mc;
+    while ((mc = reClause.exec(t))) clauseAt.push(mc.index + mc[0].length);
+
+    const parts = [];
+    let rest = t;
+    while (rest.length > target && parts.length < n - 1) {
+      const lo = Math.max(MIN_PART, Math.floor(target * 0.65));
+      const hi = Math.min(rest.length - MIN_PART, Math.ceil(target * 1.35));
+      let cut = -1;
+      // 优先：该范围内的标点断点
+      for (const p of clauseAt) {
+        if (p >= lo && p <= hi) { cut = p; break; }
+      }
+      if (cut < 0) {
+        // 其次：从 target 往外找最近的空格（先往下、再往上）。
+        // 必须「就近」而不是「最靠后」—— 取最靠后会切出超过 maxLen 的长段，
+        // 等于白拆。
+        for (let d = 0; d <= target && cut < 0; d++) {
+          for (const i of [target - d, target + d]) {
+            if (i >= lo && i <= hi && rest[i] === ' ') { cut = i + 1; break; }
+          }
+        }
+      }
+      if (cut < 0) {
+        // 整段没有空格（极端 ASR 产物）→ 只能硬切，否则死循环
+        cut = Math.min(target, rest.length);
+      }
+      parts.push(rest.slice(0, cut).trim());
+      rest = rest.slice(cut).trim();
+      if (!rest) break;
+    }
+    if (rest) parts.push(rest);
+
+    // 尾巴过短就并回上一段（宁可让上一段略长，也不要单独闪一个短片段）
+    if (parts.length > 1 && parts[parts.length - 1].length < MIN_PART) {
+      const tail = parts.pop();
+      parts[parts.length - 1] += ' ' + tail;
+    }
+    return parts.map((p) => ({ text: p }));
+  }
 
   /** 解析 json3 */
   function parseJson3(text) {
@@ -82,15 +143,42 @@
    * 把碎片行合并成句子。
    * 规则：遇到句末标点就收句；单句过长（>maxLen）在逗号处断开；
    * 相邻行间隔过大（>gap）也断开。
+   *
+   * maxLen 从 180 收到 120：
+   *   180 的时候，字幕框最宽可到 1180px，一句 130 字符的英文能撑满两行、
+   *   配上中文三行，整个框能占到画面高度的 40%（见 README 的「长句折行」一节）。
+   *   收到 120 之后，多数长句会在逗号处断成两段，每段一行，框高收敛到两行左右。
+   *   代价是「半句」也会被当成一段送翻译 —— 机翻按逗号断句是可接受的，
+   *   而断在逗号处的语义完整性比断在任意位置好得多。
    */
-  function segment(rows, { maxLen = 180, gap = 2.0 } = {}) {
+  function segment(rows, { maxLen = 120, gap = 2.0 } = {}) {
     const sentences = [];
     let cur = null;
 
     const flush = () => {
       if (cur && cur.text.trim()) {
         cur.text = cur.text.replace(/\s+/g, ' ').trim();
-        sentences.push(cur);
+        // 太长的句子（没有逗号可断的那种）交给 splitLong 二次切分
+        const parts = splitLong(cur.text, maxLen);
+        if (parts.length <= 1) {
+          sentences.push(cur);
+        } else {
+          // 切成了多段：时间轴按字符数比例分配，否则 findByTime 只会命中第一段，
+          // 后面几段永远显示不出来。
+          const total = cur.text.length;
+          const span = Math.max(0.3, cur.end - cur.start);
+          let acc = 0;
+          for (const part of parts) {
+            const share = part.text.length / total;
+            sentences.push({
+              ...cur,
+              start: cur.start + span * acc,
+              end: cur.start + span * (acc + share),
+              text: part.text,
+            });
+            acc += share;
+          }
+        }
       }
       cur = null;
     };

@@ -706,6 +706,33 @@
     }
     // 句子变长/变短后框高可能变化，自由模式下重新夹一次纵向位置，避免下半截出画面
     if (state.settings?.freePos) reapplyFreePos();
+    fitToFrame();
+  }
+
+  /**
+   * 字幕框太高时按比例缩小字号，让它留在视频画面里。
+   *
+   * 为什么需要：句子长度差异极大（"Yes." 到 300 字符的 ASR 长句），
+   * 固定字号下长句能把框撑到视频画面的一半以上，把画面盖掉。
+   * 只靠 subtitles.js 的 splitLong 不够 —— 拆分有 300 字符硬上限，
+   * 而且用户可以把字号调到 48px。
+   *
+   * 做法：量出框的自然高度，如果超过画面高度的 55%，就按超出比例
+   * 缩小 --trace-fit（CSS 里与 --trace-font-scale 相乘）。
+   * 下限 0.62，再小就不可读了 —— 到那时宁可让框超出，也不缩成蚂蚁字。
+   */
+  function fitToFrame() {
+    if (!overlayEl || !boxEl) return;
+    const g = overlayGeom();
+    if (!g.height) return;
+    // 先复位再量，否则上一句的缩小值会影响这次测量
+    overlayEl.style.setProperty('--trace-fit', '1');
+    const h = boxEl.offsetHeight || 0;
+    if (!h) return;
+    const budget = g.height * 0.55;
+    if (h <= budget) return;
+    const fit = Math.max(0.62, budget / h);
+    overlayEl.style.setProperty('--trace-fit', fit.toFixed(3));
   }
 
   /**
