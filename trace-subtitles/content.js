@@ -68,6 +68,8 @@
     wordPopup: null,
     /** 已加入生词本的单词（小写），用于全站高亮 */
     wordSet: new Set(),
+    /** 上一轮翻译实际使用的目标语言（设置晚到时用来判断是否需要重翻） */
+    translatedTarget: '',
   };
 
   // ------------------------------------------------------------ DOM
@@ -386,25 +388,41 @@
   /** 面板改设置：先本地生效，再持久化，再广播给其它标签页 */
   let patchTimer = null;
   const patchPending = {};
+
+  /** 立刻把攒着的设置写进后台（不等防抖），返回 Promise */
+  async function flushSettingsPatch() {
+    clearTimeout(patchTimer);
+    patchTimer = null;
+    const p = { ...patchPending };
+    for (const k of Object.keys(patchPending)) delete patchPending[k];
+    if (!Object.keys(p).length) return;
+    try {
+      await sendMsg({ type: 'settings:set', patch: p }, 8000);
+    } catch (_) {}
+  }
+
   function patchSettings(patch, retranslate = false) {
     state.settings = { ...state.settings, ...patch };
     applySettingsToOverlay();
     if (state.active) renderActive(state.active);
+    Object.assign(patchPending, patch);
+
     if (retranslate) {
-      // 语言/引擎变了：旧译文作废，重新翻
+      // 语言/引擎变了：旧译文作废，重新翻。
+      // 注意顺序：必须先把设置写进后台，再开始翻译。
+      // 否则后台读到的还是旧 engine，会拿新引擎的名字去跑旧引擎（表现为
+      // “切到 Google 了但还是没译文”）。
       state.sentences.forEach((s) => {
         s.zh = '';
+        s.zhSpans = [];
+        s.zhAlignTried = false;
       });
-      translateAll();
+      flushSettingsPatch().then(() => translateAll());
     }
-    Object.assign(patchPending, patch);
+
     clearTimeout(patchTimer);
-    patchTimer = setTimeout(async () => {
-      const p = { ...patchPending };
-      for (const k of Object.keys(patchPending)) delete patchPending[k];
-      try {
-        await chrome.runtime.sendMessage({ type: 'settings:set', patch: p });
-      } catch (_) {}
+    patchTimer = setTimeout(() => {
+      flushSettingsPatch();
     }, 220);
   }
 
@@ -877,6 +895,8 @@
     const gen = ++translateGen;
     state.translating = true;
     const target = state.settings?.targetLang || 'zh-CN';
+    // 记下这一轮用的目标语言：设置晚到时（init 先用了默认值）靠它判断要不要重翻
+    state.translatedTarget = target;
 
     try {
       // 分批送翻译，边翻边渲染，不必等全部完成
@@ -1348,13 +1368,58 @@
     scheduleLoad(900);
   }
 
-  async function init() {
+  // ------------------------------------------------------------ 设置兜底
+  //
+  // MV3 的 service worker 会空闲休眠，冷启动要几百毫秒到几秒。
+  // 早期版本 init() 里第一句就是 `await chrome.runtime.sendMessage({type:'settings:get'})`
+  // 且**没有超时**，一旦这个 Promise 迟迟不 resolve，init 后面全部不执行：
+  // buildOverlay 没跑 → 没有字幕层；scheduleLoad 没跑 → 不去抓字幕轨。
+  // 用户看到的就是"刷新页面后只有 YouTube 自带字幕，点一下插件图标（唤醒 SW）
+  // 之后字幕才冒出来"。
+  // 修法：settings:get 用带超时的 sendMsg，失败就用这份默认值继续，绝不阻塞主流程。
+  const FALLBACK_SETTINGS = {
+    enabled: true,
+    targetLang: 'zh-CN',
+    sourceLang: 'auto',
+    mode: 'bilingual',
+    fontScale: 1,
+    position: 18,
+    freePos: null,
+    engine: 'google',
+    autoHideNative: true,
+    clickWord: true,
+    origSize: 28,
+    transSize: 21,
+    origColor: '#ffffff',
+    transColor: '#ebebeb',
+    bgAlpha: 0.55,
+    radius: 12,
+    blur: 18,
+    showLauncher: true,
+  };
+
+  /**
+   * 拉一次设置。超时/失败都退回默认值并记一条日志。
+   * 拿到真设置后会自动 applySettingsToOverlay()，让界面追上来。
+   */
+  async function loadSettings(ms = 2500) {
     try {
-      const r = await chrome.runtime.sendMessage({ type: 'settings:get' });
-      state.settings = r && r.ok ? r.data : {};
-    } catch (_) {
-      state.settings = {};
+      const r = await sendMsg({ type: 'settings:get' }, ms);
+      if (r && r.ok && r.data) {
+        state.settings = { ...FALLBACK_SETTINGS, ...r.data };
+        return true;
+      }
+    } catch (e) {
+      console.warn('[Trace] 读取设置超时，先用默认值继续', e.message || e);
     }
+    state.settings = { ...FALLBACK_SETTINGS };
+    return false;
+  }
+
+  async function init() {
+    // 先用默认值把界面立起来，再异步拉真设置。
+    // 这样即使后台还没醒，字幕层和抓字幕流程也已经在跑了。
+    state.settings = { ...FALLBACK_SETTINGS };
     buildOverlay();
     buildLauncher();
     applySettingsToOverlay();
@@ -1377,7 +1442,27 @@
     });
     obs.observe(document.documentElement, { childList: true, subtree: true });
 
+    // 字幕抓取不依赖设置，立刻开跑
     scheduleLoad(1000);
+
+    // 设置随后到：到了再套用一次（可能改变语言/引擎/样式）
+    const ok = await loadSettings(2500);
+    if (ok) {
+      applySettingsToOverlay();
+      if (state.active) renderActive(state.active);
+      // 之前用默认语言（zh-CN）翻过的句子，若真实目标语言不同，需要重翻
+      if (state.sentences.length && state.sentences.some((s) => s.zh)) {
+        const target = state.settings.targetLang || 'zh-CN';
+        if (state.translatedTarget && state.translatedTarget !== target) {
+          state.sentences.forEach((s) => {
+            s.zh = '';
+            s.zhSpans = [];
+            s.zhAlignTried = false;
+          });
+          translateAll();
+        }
+      }
+    }
   }
 
   chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {

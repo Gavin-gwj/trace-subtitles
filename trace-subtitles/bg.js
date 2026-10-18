@@ -252,13 +252,37 @@ async function myMemoryTranslate(text, source, target) {
   const res = await fetchT(url, {}, 10000);
   if (!res.ok) throw new Error('mymemory http ' + res.status);
   const json = await res.json();
-  return String(json?.responseData?.translatedText || '');
+  const out = String(json?.responseData?.translatedText || '');
+  // 额度用尽时 MyMemory 仍然返回 HTTP 200，但正文是
+  // "MYMEMORY WARNING: YOU USED ALL AVAILABLE FREE TRANSLATIONS FOR TODAY..."
+  // 这种"看起来成功"的响应必须当成失败抛出，否则界面会把警告当成译文显示，
+  // 或者（更糟）返回空串让整批译文消失。
+  if (/^MYMEMORY WARNING/i.test(out.trim())) {
+    throw new Error('mymemory quota exhausted');
+  }
+  return out;
 }
 
 async function translateBatch(texts, source, target) {
+  if (!texts.length) return [];
   const engine = (await getSettings()).engine;
+
   if (engine === 'mymemory') {
-    return myMemoryAll(texts, source, target);
+    // MyMemory 免费版每天只有很小额度，用尽后每条都失败。
+    // 如果整批几乎全空，说明额度/网络出问题了，这里自动降级到 Google，
+    // 否则用户切到 MyMemory 后只会看到"译文全没了"（而且不知道原因）。
+    const mm = await myMemoryAll(texts, source, target);
+    const okCount = mm.filter((s) => s && String(s).trim()).length;
+    if (okCount >= Math.ceil(texts.length * 0.6)) return mm;
+    console.warn(
+      `[Trace bg] MyMemory 只翻出 ${okCount}/${texts.length} 句（多半是免费额度用尽），自动降级到 Google`
+    );
+    const gg = await googleChunked(texts, source, target);
+    // 逐句取"谁有译文用谁"，两边都不浪费
+    return texts.map((_, i) => {
+      const a = mm[i] || '';
+      return a.trim() ? a : gg[i] || '';
+    });
   }
 
   // 默认 google。真实视频动辄几百句，Google 可能中途限流（429）或返回空，
@@ -475,8 +499,11 @@ function parseMarked(out, slots) {
 
 /** 把带哨兵的句子翻成译文 + 词对齐位置；引擎不支持标记时优雅退化为纯译文 */async function translateAligned(texts, wordSets, source, target) {
   const tl = target || 'zh-CN';
+  // 对齐缓存同样必须带引擎维度（理由见 translateWithCache）。
+  // 版本号提到 al4：键结构变了（插入了引擎），旧的 al3 记录自然全部失效。
+  const engine = (await getSettings()).engine || 'google';
 
-  // ---- 1. 查缓存：对齐结果按「译文语言 + 原文 + 待高亮词集合」缓存 ----
+  // ---- 1. 查缓存：对齐结果按「引擎 + 译文语言 + 原文 + 待高亮词集合」缓存 ----
   // fallback 记录该条是否是「标记失败退回纯译文」的降级结果：
   // 降级结果只用于当下渲染，不写入缓存，否则之后换生词也修不好（词没翻就是没翻）。
   const result = {
@@ -487,12 +514,19 @@ function parseMarked(out, slots) {
   const missIdx = [];
   const missMarked = [];
 
+  const keyOf = (i) =>
+    `${engine}|${tl}|al4|${hashStr(texts[i])}|${hashStr(
+      (Array.isArray(wordSets?.[i]) ? wordSets[i] : wordSets?.[i] ? [...wordSets[i]] : [])
+        .map((w) => String(w).toLowerCase())
+        .sort()
+        .join(',')
+    )}`;
+
   for (let i = 0; i < texts.length; i++) {
     const mk = markWords(texts[i], wordSets?.[i]);
-    // 缓存键版本号 al3：早期版本会把「标记失败退回纯译文」的结果也写进来，
+    // 缓存键版本号 al4：早期版本会把「标记失败退回纯译文」的结果也写进来，
     // 那些记录的 spans 为空、译文里还夹着英文原词，换版本号即可整体绕过旧脏数据。
-    const key = `${tl}|al3|${hashStr(texts[i])}|${hashStr(((Array.isArray(wordSets?.[i]) ? wordSets[i] : wordSets?.[i] ? [...wordSets[i]] : []).map((w) => String(w).toLowerCase()).sort().join(',')))}`;
-    const hit = await idbGet('translations', key);
+    const hit = await idbGet('translations', keyOf(i));
     if (hit && typeof hit.text === 'string' && hit.text.trim() && Array.isArray(hit.spans)) {
       result.texts[i] = hit.text;
       result.spans[i] = hit.spans;
@@ -567,9 +601,7 @@ function parseMarked(out, slots) {
 
     if (result.texts[i]) {
       await idbPut('translations', {
-        key: `${tl}|al3|${hashStr(texts[i])}|${hashStr(
-          (Array.isArray(wordSets?.[i]) ? wordSets[i] : wordSets?.[i] ? [...wordSets[i]] : []).map((w) => String(w).toLowerCase()).sort().join(',')
-        )}`,
+        key: keyOf(i),
         source: texts[i],
         text: result.texts[i],
         spans: result.spans[i],
@@ -684,12 +716,15 @@ function hashStr(str) {
 /** 带缓存的批量翻译：先查缓存，再按 40 条一批请求 */
 async function translateWithCache(texts, source, target) {
   const hashFn = hashStr;
+  // 缓存键必须带引擎维度：否则切到 MyMemory 时会命中 Google 写入的旧译文，
+  // 界面看起来"切了但没变"；切回 Google 时也可能命中 MyMemory 的降级结果。
+  const engine = (await getSettings()).engine || 'google';
   const result = new Array(texts.length).fill(null);
   const missIdx = [];
   const missTexts = [];
 
   for (let i = 0; i < texts.length; i++) {
-    const key = `${target}|${hashFn(texts[i])}`;
+    const key = `${engine}|${target}|${hashFn(texts[i])}`;
     const hit = await idbGet('translations', key);
     // 旧版本可能把空串写进过缓存，这类脏数据一律当作未命中，重新翻译
     if (hit && typeof hit.text === 'string' && hit.text.trim()) {
@@ -715,7 +750,7 @@ async function translateWithCache(texts, source, target) {
       result[gi] = txt;
       if (txt) {
         await idbPut('translations', {
-          key: `${target}|${hashFn(chunk[j])}`,
+          key: `${engine}|${target}|${hashFn(chunk[j])}`,
           source: chunk[j],
           text: txt,
           target,
@@ -1025,6 +1060,8 @@ globalThis.__traceDebug = {
   wordKeys,
   hasWord,
   removeWord,
+  /** 测试辅助：直接改设置（与 'settings:set' 消息等价） */
+  setSettings,
   /** 测试辅助：与消息路由 'word:remove' 同一条路径（删除 + 广播） */
   removeWordNotify: (word) => removeWord(word),
 };

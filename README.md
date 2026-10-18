@@ -1,4 +1,4 @@
-﻿# Trancy 逆向分析 + Trace 字幕翻译（复刻）
+# Trancy 逆向分析 + Trace 字幕翻译（复刻）
 
 对 Chrome 扩展 **Trancy - AI Translator & Dual Subtitles v7.9.4** 的逆向分析结论，以及在
 `trace-subtitles/` 目录下从零复刻的一个可运行扩展（YouTube 双语字幕 + 点击查词 + 生词本）。
@@ -316,7 +316,7 @@ store），同一个视频二次打开不再请求网络。
 - **退化路径**：若引擎把哨兵全吃掉（例如 MyMemory），`usable` 判定失败 → 退回纯译文，
   中文不高亮但至少能读，不会显示乱码。
 
-### 过程中修掉的十二个真实 bug（值得记录）
+### 过程中修掉的十三个真实 bug（值得记录）
 
 **bug 1：跨消息传函数。** `content.js` 曾把 `hash: S.hash` 放进 `chrome.runtime.sendMessage`，
 而消息经过结构化克隆会丢掉函数，SW 侧抛 `TypeError: hashFn is not a function`。
@@ -707,6 +707,103 @@ hasSentinel: false   hasStrayDigit: false
 
 （`两半半` 是 Google 去重的结果，属上游语义损失，不在本扩展能修的范围内。）
 
+**bug 13：换翻译引擎 / 刷新页面，字幕就「没译文」了（三个独立故障）。**
+
+用户报障三句话：①切到 MyMemory 后译文消失；②切回 Google 仍然没有译文，必须刷新页面；
+③每次刷新页面后必须点一下扩展面板，字幕才出来。三个症状看着像同一个问题，
+实际是**三条互不相关的故障链**，各自独立修。
+
+**A. MyMemory 额度用尽时返回 HTTP 200 + 警告正文，被当成译文。**
+
+MyMemory 免费额度耗尽时**不返回 429**，而是 `200 OK`，正文是：
+
+```json
+{"responseData": {"translatedText": "MYMEMORY WARNING: YOU USED ALL AVAILABLE FREE TRANSLATIONS FOR TODAY. NEXT AVAILABLE IN 14 HOURS ..."}, "quotaFinished": null}
+```
+
+旧代码直接 `return String(json?.responseData?.translatedText || '')`，于是这句警告
+被当译文渲染到字幕上 —— 而额度耗尽后**每一句**都这样，看起来就是"译文没了/变英文了"。
+更糟的是它非空，所以 `translateBatch` 的降级分支（空结果才降级）**永远不会触发**。
+
+修复：识别警告正文，当作失败抛错，让降级链继续往下走：
+
+```js
+if (/^MYMEMORY WARNING/i.test(out.trim())) {
+  throw new Error('mymemory quota exceeded');
+}
+```
+
+**B. 缓存键里没有引擎维度 → 切引擎读到上一个引擎的译文。**
+
+`translateAligned` 的缓存键是 `${tl}|al3|${hash(text)}|${hash(words)}`，
+`translateWithCache` 是 `${target}|${hash(text)}` —— **两个都不含引擎**。
+MyMemory 那轮一旦把结果写进 IndexedDB，切回 Google 时缓存直接命中，读回的还是
+MyMemory 的（降级前的）内容，界面看起来"切了引擎没反应"。
+
+修复：缓存键最前面加引擎，并把版本号从 `al3` 提到 `al4`：
+
+```js
+const engine = (await getSettings()).engine;
+const key = `${engine}|${tl}|al4|${hashStr(texts[i])}|${hashStr(...)}`;   // 对齐路径
+const key = `${engine}|${target}|${hashFn(texts[i])}`;                   // 纯译文路径
+```
+
+**C. `init()` 第一行就 `await` 后台设置 → 后台没醒，整个字幕流程都不启动。**
+
+旧 `init()` 的第一句是 `const r = await chrome.runtime.sendMessage({type:'settings:get'})`，
+**拿到设置之前什么都不做**：不建覆盖层、不抓字幕。而 MV3 的 service worker 空闲就休眠，
+`sendMessage` 要把它唤醒、冷启动、读 storage 再回消息 —— 这段时间里页面上什么都没有。
+用户看到的"必须点一下插件才出字幕"，点的那个动作恰好唤醒了 SW，于是下一次刷新就正常了。
+
+修复：**先用默认值把界面立起来，设置随后异步补**：
+
+```js
+const FALLBACK_SETTINGS = { enabled: true, targetLang: 'zh-CN', sourceLang: 'auto', ... };
+
+async function loadSettings(ms = 2500) {
+  try {
+    const r = await sendMsg({ type: 'settings:get' }, ms);   // sendMsg 自带超时
+    if (r && r.ok && r.data) { state.settings = { ...FALLBACK_SETTINGS, ...r.data }; return true; }
+  } catch (e) { console.warn('[Trace] 读取设置超时，先用默认值继续', e.message || e); }
+  state.settings = { ...FALLBACK_SETTINGS };
+  return false;
+}
+
+async function init() {
+  state.settings = { ...FALLBACK_SETTINGS };   // ① 先立起来
+  buildOverlay(); buildLauncher(); applySettingsToOverlay();
+  loadWordSet(); startLoop();
+  scheduleLoad(1000);                          // ② 抓字幕不依赖设置，立刻开跑
+  const ok = await loadSettings(2500);          // ③ 设置随后到
+  if (ok) {
+    applySettingsToOverlay();
+    if (state.translatedTarget && state.translatedTarget !== state.settings.targetLang) {
+      // 之前按默认语言翻过的句子要作废重翻
+      state.sentences.forEach((s) => { s.zh = ''; s.zhSpans = []; s.zhAlignTried = false; });
+      translateAll();
+    }
+  }
+}
+```
+
+**这三个 bug 的测试都是先证明"能抓住旧代码"。** 把修复前的 `bg.js` / `content.js`
+从 `git show HEAD:` 取出来放进 `tools/.ext-old/`，用同一份测试跑一遍 ——
+旧代码必须 FAIL、新代码必须 PASS，否则这个测试就没在测东西。实测对照：
+
+| 断言 | 旧代码 | 新代码 |
+|---|---|---|
+| A3 译文里没有 MYMEMORY 警告原文 | **FAIL**（三句全是警告正文） | PASS（`["你好世界","这是一个测试","你今天怎么样"]`） |
+| B2 Google 没有读回 MyMemory 的缓存 | **FAIL**（读回 `【MM】Click any word...`） | PASS（`["单击任意单词即可查找"]`） |
+| C5 后台设置慢 3s 时字幕层仍立刻建立 | **FAIL**（`overlayMs: 3116`） | PASS（`overlayMs: 49`） |
+
+C5 的做法是在 SW 里把 `chrome.storage.local.get` 包一层 3 秒延迟，再开新标签页量
+`#trace-sub-overlay` 出现的耗时 —— 旧实现跟着设置一起等（3116ms），新实现先立界面（49ms）。
+
+B 用例能测出问题，靠的是**给两个引擎不同的可辨识输出**：让 MyMemory 的 mock 返回
+`【MM】<原文>`，于是"切回 Google 却拿到 `【MM】` 开头的译文"一眼就能断言。
+早期版本里 MyMemory 降级到 Google、两边输出一模一样，这个断言其实**永远为真**，
+测不出任何东西 —— 这是写降级链测试时最容易踩的坑。
+
 ### 界面重设计：从"能用"到"像产品"
 
 复刻完功能后，界面做了两轮视觉重构。核心决定是**放弃"每个页面各写一套 CSS"**，先抽出一套
@@ -828,6 +925,7 @@ node test-ui.js              # 手柄悬停显隐 + 悬浮按钮 + 页内面板 
 node test-zh-highlight.js    # 译文里对应中文也高亮（多词 / 点击 / 移除），截图 shot-zh-highlight.png
 node test-wordbook.js        # 词库看板：KPI/状态环/柱状图/筛选/搜索/抽屉/复习/删除/粒度切换
 node test-frame.js           # 字幕贴视频框 + 全屏等比放大 + 退全屏缩回，截图 shot-frame-*.png
+node test-settings.js        # MyMemory 额度降级 + 引擎切换缓存 + 免点插件自动出字幕
 ```
 
 `tools/mock/` 用 Playwright `page.route()` 整体伪造 `https://www.youtube.com/**`，
@@ -964,7 +1062,9 @@ D:\MyFiles\项目\Trace\
    ├─ shot-wordbook-drawer.png  词库看板单词抽屉截图
    ├─ shot-frame-normal.png     非全屏：字幕落在视频画面内
    ├─ shot-frame-fullscreen.png 全屏：字幕随画面等比放大
-   └─ shot-glass.png            毛玻璃 + 3 点拖动胶囊截图
+   ├─ shot-glass.png            毛玻璃 + 3 点拖动胶囊截图
+   ├─ test-settings.js          MyMemory 降级 / 引擎切换缓存 / 自动出字幕回归
+   └─ shot-settings.png         自动出字幕截图（未点插件）
 ```
 
 ## 五、与 Trancy 的差距
