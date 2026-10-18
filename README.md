@@ -1,9 +1,44 @@
-# Trancy 逆向分析 + Trace 字幕翻译（复刻）
+# Trace 字幕翻译
 
-对 Chrome 扩展 **Trancy - AI Translator & Dual Subtitles v7.9.4** 的逆向分析结论，以及在
-`trace-subtitles/` 目录下从零复刻的一个可运行扩展（YouTube 双语字幕 + 点击查词 + 生词本）。
+看 YouTube 英文视频时，在画面上显示**中英双语字幕**；鼠标点任意一个单词，弹出中文释义，
+一键存进生词本；存过的词**在任何视频里都会自动高亮**，方便复习。
+
+免费、开源、不用注册登录，字幕和生词本都保存在你自己的电脑上。
+
+![双语字幕 + 点词查义 + 生词高亮](tools/shot-mock.png)
+
+> 这个项目起因于逆向分析付费插件 **Trancy**（v7.9.4），搞清它怎么拿到 YouTube 字幕、
+> 怎么做双语渲染，然后从零写了一个功能对等的替代品。逆向结论在本文后半部分，
+> 只想用的话直接跳到 [三、安装与使用](#三安装与使用)。
+
+## 它能做什么
+
+| | |
+|---|---|
+| **双语字幕** | 原文 + 中文上下两行，跟着视频自动推进；长句在逗号、句号处自动断开，不会糊成一大坨 |
+| **点词查义** | 点字幕里任何英文单词，弹出音标、中文释义、这个词在本句里的意思；英文原文折叠收起，不挡视线 |
+| **划短语** | 鼠标拖选连续几个词（如 `dive in`），松手就查整段短语的意思，而不是逐词硬拼 |
+| **生词本** | 一键收藏单词或短语；**跨视频高亮**——今天存的词，明天看别的视频照样亮起来 |
+| **单复数同源** | 收藏了 `beverage`，字幕里出现 `beverages` 也会高亮，点进去是同一个词条 |
+| **不丢数据** | 生词本可写成本机文件；卸载重装插件后能恢复，学习进度（复习次数、是否已记住）也保留 |
+| **不碍事** | 字幕贴视频画面而不是浏览器窗口，全屏自动等比放大；压住 YouTube 自己的设置菜单时自动淡出；视频滚出视野就隐藏 |
+| **可换翻译引擎** | 默认用 Google 免费接口（快、零成本）；也可接自己的大模型（OpenAI 兼容 API），习语和上下文翻得更准 |
+
+## 三分钟装好
+
+1. 下载本仓库（右上角 Code → Download ZIP，或 `git clone`）
+2. Chrome 地址栏输入 `chrome://extensions/`，打开右上角「开发者模式」
+3. 点「加载已解压的扩展程序」，选择仓库里的 **`trace-subtitles`** 文件夹
+4. 打开任意 YouTube 视频，字幕会自动出现
+
+不需要注册账号，不需要填任何 API Key。想换大模型引擎再去设置里填。
 
 ---
+
+# 附：Trancy 逆向分析
+
+以下是「它为什么能工作」的技术记录，供想自己改造或复刻同类插件的人参考。
+只想用插件的话，上面的内容就够了。
 
 ## 一、Trancy 是怎么工作的
 
@@ -1956,12 +1991,7 @@ L16b 是 bug 17 之后补的：`ctx.route()` 只在浏览器网络层拦截，�
 
 ## 三、安装与使用
 
-### 加载扩展
-
-1. Chrome 打开 `chrome://extensions/`
-2. 右上角打开「开发者模式」
-3. 「加载已解压的扩展程序」→ 选择 `D:\MyFiles\项目\Trace\trace-subtitles`
-4. 打开任意 YouTube 视频，字幕会自动出现
+安装步骤见文首 [三分钟装好](#三分钟装好)。下面是每项功能的详细说明与设计取舍。
 
 ### 功能
 
@@ -2183,39 +2213,40 @@ D:\MyFiles\项目\Trace\
    ├─ test-backup.js            生词本落盘回归（写文件/卸载恢复/合并进度/自选目录）
    ├─ test-global.js            全局显示悬浮条 + 离开画面隐藏 + 迷你播放器避让
    ├─ test-dodge.js             字幕压住设置菜单时让路（淡出 + 点击穿透）
-├─ test-dict.js              查词卡片中文优先（词性中文 + 释义中文化 + 语境义）
-├─ test-phrase.js            短语整段释义 + 短语生词本 + 大模型引擎与降级
-├─ test-invisible.js         译文里不残留英文（零宽空格破坏匹配）
-├─ test-llm.js               大模型配置：手势里申请权限 + 拉模型 + 测试连接 + 后台可用
-├─ test-split.js             句中句号断开 + 单句不拆 + 时间轴分摊 + 跨 cue 合并不回归
-├─ lib\perm-ext.js           测试助手：预置 host_permissions，绕开点不到的原生权限弹框
-├─ run-all.js                一次跑完全部回归，输出汇总表
-├─ shot-dict.png             查词卡片：本句译作「立即」与单词直译「立即地」并存
-├─ shot-phrase.png           短语卡：警示条 + 降级释义 + 逐词对照
-├─ shot-phrase-board.png     词库看板的短语视图与短语抽屉
+   ├─ test-dict.js              查词卡片中文优先（词性中文 + 释义中文化 + 语境义）
+   ├─ test-phrase.js            短语整段释义 + 短语生词本 + 大模型引擎与降级
+   ├─ test-invisible.js         译文里不残留英文（零宽空格破坏匹配）
+   ├─ test-llm.js               大模型配置：手势里申请权限 + 拉模型 + 测试连接 + 后台可用
+   ├─ test-split.js             句中句号断开 + 单句不拆 + 时间轴分摊 + 跨 cue 合并不回归
+   ├─ test-settings.js          MyMemory 降级 / 引擎切换缓存 / 自动出字幕回归
+   ├─ lib\perm-ext.js           测试助手：预置 host_permissions，绕开点不到的原生权限弹框
+   ├─ run-all.js                一次跑完全部回归，输出汇总表
+   ├─ gen-icons.js              纯 Node 生成 PNG 图标
    ├─ probe-ext2\               主世界 vs 隔离世界对照实验
    ├─ probe-transcript.js       get_transcript 接口探针
-   ├─ gen-icons.js              纯 Node 生成 PNG 图标
-   ├─ shot-mock.png             验证截图（高亮 + 查词卡）
-   ├─ shot-pot.png              pot 模式验证截图
-   ├─ shot-center.png           拖动后居中验证截图
-   ├─ shot-ui.png               悬浮按钮 + 放大字号截图
-   ├─ shot-ui-panel.png         页内设置面板展开截图
-   ├─ shot-zh-highlight.png     译文中文高亮截图
-   ├─ shot-wordbook.png         词库看板截图
-   ├─ shot-wordbook-drawer.png  词库看板单词抽屉截图
-   ├─ shot-frame-normal.png     非全屏：字幕落在视频画面内
-   ├─ shot-frame-fullscreen.png 全屏：字幕随画面等比放大
-   ├─ shot-glass.png            毛玻璃 + 3 点拖动胶囊截图
-   ├─ shot-forms.png            复数形式高亮 + 单数词卡截图
-   ├─ shot-global.png           全局显示悬浮条（避开右下角迷你播放器）截图
-   ├─ shot-dodge.png            菜单开着但字幕已挪开：不让路，字幕清晰
-   ├─ shot-dodge-overlap.png    字幕压住菜单：完全淡出，菜单可读可点
-   ├─ test-settings.js          MyMemory 降级 / 引擎切换缓存 / 自动出字幕回归
-   ├─ shot-settings.png         自动出字幕截图（未点插件）
-   ├─ shot-backup.png           词库页备份区截图（选目录 + 自动备份开关）
-   └─ (以上测试每次跑完自动生成对应截图)
+   └─ shot-*.png                各测试跑完自动生成的验证截图
 ```
+
+截图清单（`tools/` 下，每次跑测试自动重新生成）：
+
+| 文件 | 内容 |
+|---|---|
+| `shot-mock.png` | 双语字幕 + 生词高亮 + 查词卡 |
+| `shot-pot.png` | pot 模式下靠网络钩子拿到字幕 |
+| `shot-dict.png` | 查词卡：「本句译作」与「单词直译」并列 |
+| `shot-phrase.png` | 短语卡：警示条 + 降级释义 + 逐词对照 |
+| `shot-phrase-board.png` | 词库看板的短语视图与短语抽屉 |
+| `shot-center.png` | 拖动后横向仍居中 |
+| `shot-ui.png` / `shot-ui-panel.png` | 悬浮按钮 + 页内设置面板 |
+| `shot-zh-highlight.png` | 译文里对应中文的高亮 |
+| `shot-wordbook.png` / `shot-wordbook-drawer.png` | 词库看板与单词抽屉 |
+| `shot-frame-normal.png` / `shot-frame-fullscreen.png` | 非全屏 / 全屏字幕位置 |
+| `shot-glass.png` | 毛玻璃底 + 3 点拖动胶囊 |
+| `shot-forms.png` | 复数形式高亮 + 单数词卡 |
+| `shot-global.png` | 全局显示悬浮条（避开右下角迷你播放器） |
+| `shot-dodge.png` / `shot-dodge-overlap.png` | 让路 YouTube 设置菜单 |
+| `shot-settings.png` | 未点插件也自动出字幕 |
+| `shot-backup.png` | 词库页备份区（选目录 + 自动备份开关） |
 
 ## 五、与 Trancy 的差距
 
