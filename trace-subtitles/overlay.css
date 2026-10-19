@@ -326,6 +326,91 @@
   color: #b6f5ec;
 }
 
+/*
+ * 背单词模式：已收藏词对应的中文默认模糊，鼠标移上去才看清。
+ *
+ * 为什么用 filter:blur 而不是 color:transparent：
+ * blur 保留字形的轮廓和长度，用户能看出"这里有 2 个字被遮住了"，
+ * 知道该往哪儿看；完全透明会让这句话看起来少了一截，反而像渲染 bug。
+ * 而且 blur 的过渡是连续的（transition 直接插值半径），不会闪。
+ *
+ * 注意遮的是**译文**不是原文：用户先读英文猜意思，再移上来对答案，
+ * 这才是背单词的动作。原文那侧保持清晰（金色高亮），否则整句都没法读。
+ */
+#trace-sub-overlay .trace-saved-zh.trace-zh-blur {
+  filter: blur(5px);
+  opacity: .72;
+  transition: filter .18s ease, opacity .18s ease, background-color .12s ease,
+    color .12s ease;
+}
+#trace-sub-overlay .trace-saved-zh.trace-zh-blur:hover {
+  filter: none;
+  opacity: 1;
+}
+
+/*
+ * 记忆状态配色：已记住=淡绿，新词/记忆中=红。
+ *
+ * 英文侧和中文侧同时换色，让"这个词什么状态"在两个位置一致 ——
+ * 只改一侧的话，用户看完英文再看中文会以为换了另一条记录。
+ * 用 data-st 而不是额外的 class：状态只有一个值，class 列表会越叠越长。
+ */
+#trace-sub-overlay .trace-word.trace-saved[data-st="learned"] {
+  color: #a8f0c8;
+  background: rgba(70, 211, 154, .17);
+  box-shadow: inset 0 -2px 0 rgba(70, 211, 154, .85);
+}
+#trace-sub-overlay .trace-word.trace-saved[data-st="learned"]:hover {
+  background: rgba(70, 211, 154, .32);
+  color: #d6ffe9;
+}
+#trace-sub-overlay .trace-word.trace-saved[data-st="new"],
+#trace-sub-overlay .trace-word.trace-saved[data-st="learning"] {
+  color: #ffb0b4;
+  background: rgba(242, 85, 90, .16);
+  box-shadow: inset 0 -2px 0 rgba(242, 85, 90, .8);
+}
+#trace-sub-overlay .trace-word.trace-saved[data-st="new"]:hover,
+#trace-sub-overlay .trace-word.trace-saved[data-st="learning"]:hover {
+  background: rgba(242, 85, 90, .3);
+  color: #ffe0e1;
+}
+
+/* 译文侧同样按状态着色，但保持"无底色 + 虚线下划线"的形状不变 */
+#trace-sub-overlay .trace-saved-zh[data-st="learned"] {
+  color: #7fdcaf;
+  text-decoration-color: rgba(127, 220, 175, .9);
+}
+#trace-sub-overlay .trace-saved-zh[data-st="learned"]:hover {
+  background: rgba(70, 211, 154, .22);
+  color: #b9f5d4;
+}
+#trace-sub-overlay .trace-saved-zh[data-st="new"],
+#trace-sub-overlay .trace-saved-zh[data-st="learning"] {
+  color: #ff9ea3;
+  text-decoration-color: rgba(255, 158, 163, .9);
+}
+#trace-sub-overlay .trace-saved-zh[data-st="new"]:hover,
+#trace-sub-overlay .trace-saved-zh[data-st="learning"]:hover {
+  background: rgba(242, 85, 90, .22);
+  color: #ffd0d2;
+}
+
+/*
+ * 短语内部的词不参与记忆状态配色。
+ *
+ * 上面那两条 `[data-st=...]` 规则的优先级和 `.trace-phrase .trace-word...`
+ * 完全相同（都是一个 ID + 两个 class + 一个属性），而它写在后面，
+ * 会把短语内部词的"无底色"规则顶掉 —— 于是整段短语变成一块块红/绿碎块，
+ * 既看不出短语是一个整体，也和单词的样子重了。这条兜底必须放在状态配色之后。
+ */
+#trace-sub-overlay .trace-phrase .trace-word.trace-saved[data-st],
+#trace-sub-overlay .trace-phrase .trace-word.trace-in-phrase[data-st] {
+  background: none;
+  box-shadow: none;
+  color: #ffe08a;
+}
+
 /* ------------------------------------------------------------ 查词弹窗 */
 /*
  * 四套卡片主题，共用同一份结构，只换 CSS 变量。
@@ -889,6 +974,35 @@
 #trace-word-popup .trace-pop-add.trace-done {
   background: var(--pop-done);
   color: #fff;
+}
+/*
+ * 「标记为已记住」是次要动作：做成幽灵按钮（描边、透明底），
+ * 不跟主按钮争视觉重量。用户的主流程是「加入生词本」，
+ * 这个按钮只在已经收藏之后出现，是回访时的补充操作。
+ */
+#trace-word-popup .trace-pop-learn {
+  width: 100%;
+  margin-top: 6px;
+  padding: 7px 0;
+  border: 1px solid rgba(70, 211, 154, .55);
+  border-radius: 8px;
+  background: rgba(70, 211, 154, .1);
+  color: #8fe6bd;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background .15s ease, border-color .15s ease, color .15s ease;
+}
+#trace-word-popup .trace-pop-learn:hover {
+  background: rgba(70, 211, 154, .22);
+  border-color: rgba(70, 211, 154, .85);
+  color: #d6ffe9;
+}
+#trace-word-popup .trace-pop-learn.trace-learned {
+  background: rgba(70, 211, 154, .2);
+  border-color: rgba(70, 211, 154, .5);
+  color: #a8f0c8;
+  cursor: default;
 }
 
 /* ============================================================

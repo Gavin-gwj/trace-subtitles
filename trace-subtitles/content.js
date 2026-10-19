@@ -70,6 +70,17 @@
     wordSet: new Set(),
     /** 已加入生词本的短语（归一化文本），用于连续多词高亮 */
     phraseSet: [],
+    /**
+     * 每个已收藏词的记忆状态：{ [小写词]: 'new'|'learning'|'learned' }。
+     * 与 wordSet 分开维护 —— wordSet 管「在不在生词本」，这份管「记得怎么样」。
+     * 字幕高亮按这里上色，查不到状态的按 new 处理（红色）。
+     */
+    wordStates: Object.create(null),
+    /**
+     * 本句内已经计过复习的词，防止鼠标在同一个词上多晃几下就刷满复习次数。
+     * 换句时清空 —— 用户说的是「下一次出现」，同一句算同一次。
+     */
+    reviewedHere: new Set(),
     /** 上一轮翻译实际使用的目标语言（设置晚到时用来判断是否需要重翻） */
     translatedTarget: '',
   };
@@ -104,6 +115,8 @@
     origEl.addEventListener('click', onWordClick);
     // 译文里高亮的中文也能点：直接打开同一个生词卡片
     transEl.addEventListener('click', onWordClick);
+    // 盯着译文上的中文停留够久 = 记一次复习（背单词模式的核心动作）
+    bindReviewTriggers();
     initDrag();
   }
 
@@ -313,6 +326,10 @@
             <div class="tp-row" style="padding-left:0;padding-right:0;">
               <div class="tp-label">全局显示<div class="tp-sub">离开视频画面时改成贴底悬浮条</div></div>
               <label class="tp-switch"><input type="checkbox" data-k="globalMode" /><span class="tp-slider"></span></label>
+            </div>
+            <div class="tp-row" style="padding-left:0;padding-right:0;">
+              <div class="tp-label">背单词模式<div class="tp-sub">生词的译文先遮住，鼠标移上去才看清</div></div>
+              <label class="tp-switch"><input type="checkbox" data-k="blurZh" /><span class="tp-slider"></span></label>
             </div>
             <div class="tp-row" style="padding-left:0;padding-right:0;">
               <div class="tp-label">显示悬浮按钮<div class="tp-sub">播放器右下角的 T 按钮</div></div>
@@ -931,10 +948,16 @@
     }
     let html = '';
     let cursor = 0;
+    // 背单词模式：已收藏词对应的中文默认模糊，鼠标移上去才看清。
+    // 这个类只加在 .trace-saved-zh 上，未收藏的词译文永远是清楚的 ——
+    // 用户是来看懂的，不是每句都做填空。
+    const blur = state.settings?.blurZh !== false;
     for (const s of valid) {
       if (s.start < cursor) continue; // 与上一段重叠，跳过
       html += escapeHtml(zh.slice(cursor, s.start));
-      html += `<span class="trace-saved-zh" data-w="${escapeAttr(s.word)}">${escapeHtml(zh.slice(s.start, s.end))}</span>`;
+      const cls = 'trace-saved-zh' + (blur ? ' trace-zh-blur' : '');
+      const st = ` data-st="${escapeAttr(stateOf(s.word))}"`;
+      html += `<span class="${cls}" data-w="${escapeAttr(s.word)}"${st}>${escapeHtml(zh.slice(s.start, s.end))}</span>`;
       cursor = s.end;
     }
     html += escapeHtml(zh.slice(cursor));
@@ -959,6 +982,17 @@
       if (cand !== w && state.wordSet.has(cand)) return cand;
     }
     return null;
+  }
+
+  /**
+   * 取某个已收藏词的记忆状态：'new' | 'learning' | 'learned'。
+   * 查不到就按 'new' —— 老生词本里没有 status 字段，按「还没记住」上色比
+   * 按「已记住」上色更符合直觉（默认不奖励用户）。
+   */
+  function stateOf(word) {
+    const k = String(word || '').toLowerCase();
+    const st = state.wordStates && state.wordStates[k];
+    return st === 'learned' || st === 'learning' ? st : 'new';
   }
 
   /** 这句话里哪些词是生词（小写集合），用于后台打标记 */
@@ -1090,9 +1124,12 @@
       }
       const cls =
         'trace-word' + (p.saved ? ' trace-saved' : '') + (openPhrase ? ' trace-in-phrase' : '');
+      // data-st 让 CSS 按记忆状态上色（learned=淡绿，new/learning=红）。
+      // 只有已收藏的词才带这个属性，未收藏的词不该被上色误导。
+      const st = p.saved ? ` data-st="${escapeAttr(stateOf(p.canon || p.word))}"` : '';
       out +=
         escapeHtml(p.pre) +
-        `<span class="${cls}" data-w="${escapeAttr(p.canon || p.word)}"` +
+        `<span class="${cls}" data-w="${escapeAttr(p.canon || p.word)}"${st}` +
         (openPhrase ? ` data-p="${escapeAttr(openPhrase)}"` : '') +
         '>' +
         escapeHtml(p.word) +
@@ -1415,6 +1452,9 @@
       if (key !== lastKey) {
         lastKey = key;
         state.active = s;
+        // 换句：本句的复习记录清零。「下一次出现」是按句子算的，
+        // 同一句里来回看同一个词不重复计数。
+        state.reviewedHere.clear();
         renderActive(s);
       }
     }
@@ -1510,6 +1550,33 @@
           refreshActiveWords();
         } catch (e) {
           btn.textContent = isPhrase ? '✓ 短语已在生词本' : '✓ 已在生词本';
+          btn.disabled = false;
+        }
+      }
+      if (act === 'learned') {
+        // 用户手动宣告「这个词我已经记住了」：一次到位，不用等复习三次。
+        const d = state.wordPopup;
+        if (!d) return;
+        btn.disabled = true;
+        btn.textContent = '保存中…';
+        try {
+          const r = await chrome.runtime.sendMessage({
+            type: 'word:mark-learned',
+            word: d.word,
+          });
+          if (r && r.ok) {
+            btn.textContent = '✓ 已经记住';
+            btn.classList.add('trace-learned');
+            state.wordStates[String(d.word).toLowerCase()] = 'learned';
+            refreshActiveWords();
+            // 供测试断言：颜色变化是异步重渲染的，给一个可观察的落点
+            document.documentElement.dataset.traceLastLearned = String(d.word);
+          } else {
+            btn.textContent = '保存失败';
+            btn.disabled = false;
+          }
+        } catch (e) {
+          btn.textContent = '保存失败';
           btn.disabled = false;
         }
       }
@@ -1674,6 +1741,9 @@
     // data-w 在渲染时已归一化成生词本里的那个词（点 beverages 拿到 beverage），
     // 但历史渲染结果或手动构造的节点可能还是原始词形，这里再归一化一次兜底。
     const canon = findSaved(word) || word;
+    // 点开已收藏词的卡片 = 用户查看了一次答案，算一次复习
+    // （用户原话：「你点击了它或者鼠标移动到下面的译文上，那么会被算作重新记忆」）。
+    if (findSaved(word)) recordReview(canon);
     // 生词在译文里被高亮时，后台同时给了它在那句话里的译法（zhSpans）。
     // 这是「这个词在这句里到底译成什么」最权威的答案 —— 词典给的是通用义，
     // 常常和语境义不一致（vintage 词典「优质的」/ 本句「复古」），用户会以为翻错了。
@@ -1851,6 +1921,14 @@
             ? '<button class="trace-pop-add trace-done" data-act="remove">✓ 已在生词本</button>'
             : '<button class="trace-pop-add" data-act="add">＋ 加入生词本</button>'
         }
+        ${
+          // 「已经记住」只在已收藏时才出现：没收藏的词没有记忆状态可言。
+          saved
+            ? stateOf(canon) === 'learned'
+              ? '<button class="trace-pop-learn trace-learned" data-act="learned" disabled>✓ 已经记住</button>'
+              : '<button class="trace-pop-learn" data-act="learned">标记为「已经记住」</button>'
+            : ''
+        }
       </div>`;
     // 内容渲染后弹窗变高了，必须重新定位，否则会压住字幕
     positionPopup(pop, rect);
@@ -1984,10 +2062,90 @@
       if (rp && rp.ok && Array.isArray(rp.data)) {
         state.phraseSet = rp.data.map((p) => String(p).toLowerCase()).filter(Boolean);
       }
+      // 记忆状态（新词/记忆中/已记住）：单独一条消息，不塞进 word:keys，
+      // 因为那条消息的返回值被既有测试当作字符串数组用，改结构会静默打挂高亮。
+      try {
+        const rs = await chrome.runtime.sendMessage({ type: 'word:states' });
+        if (rs && rs.ok && rs.data && typeof rs.data === 'object') {
+          state.wordStates = Object.create(null);
+          for (const [k, v] of Object.entries(rs.data)) {
+            state.wordStates[String(k).toLowerCase()] = v;
+          }
+        }
+      } catch (_) {
+        /* 旧后台没有这条消息时忽略，全部按「新词」上色 */
+      }
       refreshActiveWords();
     } catch (_) {
       /* 忽略：高亮是增强功能，失败不影响字幕 */
     }
+  }
+
+  // ------------------------------------------------------------ 记忆状态与复习
+  //
+  // 三个动作语义不同，不能混为一谈：
+  //   review   —— 「我又遇到它了 / 我看了答案」，reviewCount+1，三次才变已记住。
+  //               触发点：鼠标在译文的中文上停留够久、或点开这个词的卡片。
+  //   learned  —— 用户主动宣告「这个我早就会了」，一次到位。
+  //               触发点：卡片上的「标记为已经记住」按钮。
+  //   blur     —— 只是显示层的事，不影响记忆状态。
+
+  /** 复习防抖：鼠标停下多久算真看一眼（毫秒） */
+  const REVIEW_DWELL_MS = 800;
+  /** 当前挂着的 hover 计时器，鼠标移开要能取消 */
+  let reviewTimer = 0;
+
+  /**
+   * 记一次复习。
+   *
+   * 同一句里同一个词只记一次（state.reviewedHere）：用户在这句里来回扫视、
+   * 反复把鼠标划过同一个词，不该把复习次数刷满 —— 那会让「三次变已记住」
+   * 变成几秒钟的事，记忆曲线失去意义。「下一次出现」指的是下一句/下个视频。
+   */
+  async function recordReview(word) {
+    const k = String(word || '').toLowerCase();
+    if (!k || !state.wordSet.has(k)) return;
+    if (state.reviewedHere.has(k)) return;
+    state.reviewedHere.add(k);
+    try {
+      const r = await chrome.runtime.sendMessage({ type: 'word:review', word: k });
+      const st = r && r.ok && r.data ? r.data.status : '';
+      if (st) {
+        state.wordStates[k] = st;
+        // 状态从 learning 跳到 learned 时颜色要跟着变
+        if (st === 'learned') refreshActiveWords();
+      }
+    } catch (_) {
+      state.reviewedHere.delete(k); // 失败就别占坑，下次还能再试
+    }
+  }
+
+  /**
+   * 鼠标在译文高亮的中文上停留 → 记一次复习；点开单词卡 → 也记一次。
+   *
+   * 为什么用委托而不是给每个 span 绑事件：字幕每换一句就整块重渲染
+   * （transEl.innerHTML = ...），绑在 span 上的监听会一起被丢掉。
+   */
+  function bindReviewTriggers() {
+    const root = overlayEl;
+    if (!root || root.dataset.reviewBound) return;
+    root.dataset.reviewBound = '1';
+
+    root.addEventListener('mouseover', (ev) => {
+      const zh = ev.target.closest?.('.trace-saved-zh');
+      const w = ev.target.closest?.('.trace-word.trace-saved');
+      const el = zh || w;
+      if (!el) return;
+      const word = el.dataset.w;
+      if (!word) return;
+      clearTimeout(reviewTimer);
+      reviewTimer = setTimeout(() => recordReview(word), REVIEW_DWELL_MS);
+    });
+    root.addEventListener('mouseout', (ev) => {
+      if (!ev.target.closest?.('.trace-saved-zh, .trace-word.trace-saved')) return;
+      clearTimeout(reviewTimer);
+      reviewTimer = 0;
+    });
   }
 
   /**
@@ -2071,6 +2229,7 @@
     blur: 18,
     showLauncher: true,
     globalMode: false,
+    blurZh: true,
   };
 
   /**

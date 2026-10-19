@@ -37,6 +37,9 @@ const DEFAULT_SETTINGS = {
   // 全局显示：视频框不在视野里时（切到别的页面 / 往下翻到评论区），
   // 字幕改成贴屏幕底部的悬浮条继续跟播。关闭时只在视频框内显示。
   globalMode: false,
+  // 背单词模式：生词本里的词再次出现时，把译文里对应的中文遮住（模糊），
+  // 鼠标移上去才看清。开着才像「测试自己」，关掉就是普通双语字幕。
+  blurZh: true,
   // ---- 生词本备份 ----
   // Chrome 卸载扩展时会清空 IndexedDB，所以生词本要额外落一份 JSON 到
   // 「下载/trace-subtitles/wordbook-backup.json」。默认开，改动后自动覆盖。
@@ -1757,6 +1760,47 @@ async function removeWord(word) {
   return true;
 }
 
+/**
+ * 每个已收藏词的记忆状态，供内容脚本给字幕高亮上色。
+ *
+ * 为什么不能把状态塞进 wordKeys()：那个消息被 test-forms 等既有测试当作
+ * 「字符串数组」用（`new Set(data.map(lower))`），改成对象数组会静默把
+ * 每条都变成 "[object Object]" 的小写串，高亮全挂。所以另开一条消息，
+ * 对外保持 wordKeys 的原样。
+ *
+ * 键一律小写 —— 内容脚本查状态时用的就是 `findSaved()` 返回的规范词。
+ */
+async function wordStates() {
+  const all = await idbAll('words');
+  const out = {};
+  for (const w of all) {
+    if (!w || w.kind === 'phrase') continue;
+    const k = String(w.word || '').toLowerCase();
+    if (!k) continue;
+    out[k] = w.status || 'new';
+  }
+  return out;
+}
+
+/**
+ * 用户手动点「已经记住」。与复习的区别：复习是计数推进，这里是一次到位。
+ * 同时把 reviewCount 抬到 3（与 reviewWord 的 learned 门槛一致），
+ * 否则看板里会出现「status=learned 但 reviewCount=0」的自相矛盾记录，
+ * 且下次复习会把它从 learned 改回 learning（reviewCount 1 < 3）。
+ */
+async function markLearned(word) {
+  const key = String(word).toLowerCase();
+  const rec = await idbGet('words', key);
+  if (!rec) return null;
+  rec.status = 'learned';
+  rec.reviewCount = Math.max(rec.reviewCount || 0, 3);
+  rec.lastReview = Date.now();
+  await idbPut('words', rec);
+  await broadcastWordsChanged();
+  scheduleAutoBackup();
+  return rec;
+}
+
 async function reviewWord(word) {
   const key = String(word).toLowerCase();
   const rec = await idbGet('words', key);
@@ -2080,6 +2124,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         case 'word:phrase-keys':
           sendResponse({ ok: true, data: await phraseKeys() });
           break;
+        case 'word:states':
+          sendResponse({ ok: true, data: await wordStates() });
+          break;
+        case 'word:mark-learned':
+          sendResponse({ ok: true, data: await markLearned(msg.word) });
+          break;
         case 'word:has':
           sendResponse({ ok: true, data: await hasWord(msg.word) });
           break;
@@ -2258,6 +2308,10 @@ globalThis.__traceDebug = {
   hasWord,
   removeWord,
   reviewWord,
+  /** 每个已收藏词的记忆状态（{词: 'new'|'learning'|'learned'}） */
+  wordStates,
+  /** 手动标记「已经记住」：一次到位，不经过复习计数 */
+  markLearned,
   /** 测试辅助：直接改设置（与 'settings:set' 消息等价） */
   setSettings,
   /** 测试辅助：与消息路由 'word:remove' 同一条路径（删除 + 广播） */

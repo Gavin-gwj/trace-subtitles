@@ -252,7 +252,10 @@ const WATCH = `${ORIGIN}/watch?v=${fx.VIDEO_ID}`;
     zhPresent: !!(zh && zh.present && zh.count >= 2),
     noSentinel: !!(zh && !zh.hasSentinel),
     styled: !!(zh && zh.italic && zh.underline && zh.dash === 'dashed'),
-    cyan: !!(zh && /127,\s*227,\s*212/.test(zh.color || '')),
+    // 颜色已按记忆状态分档（新词/记忆中=红，已记住=淡绿），不再是固定的青色。
+    // 这里只断言「不是默认译文色」——说明状态着色真的生效了，
+    // 具体色值由 test-review.js 逐档断言，避免两处测试互相绑死。
+    styledByStatus: !!(zh && !/235,\s*235,\s*235|255,\s*255,\s*255/.test(zh.color || '')),
     clickOpens: !!(clickOk && clickOk.present && !clickOk.hidden && clickOk.btnAct === 'remove'),
     removed: !!(afterRemove && afterRemove.zhCount < (zh?.count || 99)),
     repeatOk: !!(repeat && !repeat.hasSentinel && !repeat.hasStrayDigit && repeat.spans.length >= 1),
