@@ -635,45 +635,177 @@ async function myMemoryAll(texts, source, target, limit = Infinity) {
 // ------------------------------------------------- 译文对齐（生词中文高亮）
 //
 // 问题：生词本里的单词，英文那边能高亮（我们自己拆词就知道位置），
-// 但中文译文是 Google 整句翻出来的，根本不知道"today"对应"今天"落在哪个字。
+// 但中文译文是 Google 整句翻出来的，根本不知道 "pick" 对应「铁镐」落在哪个字。
 //
-// 解法：把待高亮的英文词用哨兵包起来再送翻译，Google 会原样保留哨兵，
-// 中文对应词就夹在两个哨兵之间。实测（tools/probe-align3.js）：
-//   Click any ⟦0⟧word⟦1⟧ ... and ⟦2⟧save⟦3⟧ it to your ⟦4⟧wordbook⟦5⟧.
-//   → 单击任意⟦0⟧单词⟦1⟧进行查找，然后⟦2⟧将⟦3⟧保存到您的⟦4⟧单词本⟦5⟧。
-// 12 个词全标记也 12/12 命中，词形变化（capturing→捕捉、translated→翻译了）同样有效。
+// ===== 曾经的做法（已废弃，且是个真实 bug）=====
+// 把待高亮的英文词用哨兵包起来再送翻：`make my ⟦0⟧iron pick⟦1⟧.`
+// 本意是「Google 会原样保留哨兵，夹在中间的就是该词的译文」。
+// 实测（tools/probe-ctx.js）它把译文**整体改坏**：
+//   原句   "…make my iron pick."          → "…制作铁镐的好时机。"
+//   哨兵   "…make my ⟦0⟧pick⟦1⟧."         → "…制作我的熨斗⟦0⟧pick⟦1⟧的好时机。"
+// 原因：插进句中的记号把 `iron pick` 这个复合名词切开了，Google 不再把它
+// 当成一个整体，于是 `iron` 单独翻成「熨斗」、`pick` 单独翻成「挑选」。
+// 量化（tools/probe-variants.js，28 句 × 10 种记号）：**带记号后译文的其余部分
+// 与原译完全相同的只有 4/28 = 14%**，即 86% 的句子会被改写。
+// 这是方案级缺陷，换任何记号都没用（probe-marker.js 13 种记号全 [DIFF]）。
 //
-// 哨兵选 ⟦ ⟧（U+27E6/U+27E7）：普通文本几乎不可能出现，且实测被保留。
-// 索引用 slot*2 / slot*2+1，避免相邻两对共用编号导致正则错配。
+// ===== 现在的做法：主译文永远不带任何记号，对齐靠「旁路探针」=====
+// 一次批量请求里，除了原句，再按需追加若干**探针**（每个探针都是独立的一问）：
+//   ① 替换探针：把目标词换成长度相近的无意义串（`pick` → `zqxv`），
+//      再翻一遍。目标词的语义被抽走，Google 仍按原句其余部分组织译文，
+//      所以「原译 vs 替换译」的差分天然收窄到该词的贡献。
+//   ② 单词探针：目标词单独翻一次（`pick` → 「挑选」）。
+//   ③ 窗口探针：目标词连同左右各一个词一起翻（`iron pick` → 「铁镐」）。
+// 主译文 = 原句的正常翻译，**一个字符都不改**；探针只用来算高亮区间。
+//
+// 三者的**优先次序**由 tools/probe-choice.js 的实测决定（20 句语料）：
+//   · 替换探针覆盖面最广，但差分给的是「整个被重写的结构」——
+//     `pick` 差出「现在是制作铁镐」7 个字，语义对但视觉上像半句都亮了；
+//   · 单词/窗口探针精度高得多（`pick` → 「铁镐」2 字、`cloud` → 「云」1 字），
+//     代价是覆盖面低（很多词的单独译法在原译里根本不以字面出现）。
+//   两者互补：窗口探针命中 `pick`/`horizontal`，单词探针命中
+//   `cloud`/`cache`/`beverage`/`pipeline`/`fare`，替换探针兜住其余的。
+//   所以采用「**精确候选优先，替换差分兜底**」：
+//     候选必须 ①是中文 ②字面出现在主译文里 ③严格短于差分区间；
+//     满足就取最短的那个（最短 = 最接近「这个词本身的译法」）。
+//   实测（probe-choice.js）：平均高亮宽度 6.8 → 2.6 字，最宽 12 → 5 字，
+//   且**覆盖率同时从 9/20 升到 14/20** —— 没有任何取舍。
+//   差分仍然只在通过 acceptSpan（含中文、≤ 原译 50%）时采用，
+//   所以「宁可少亮，不可亮错」这条原则不变。
+//
+// 三路探针**同批发出**（实测 Google 单请求 80 个 q 也正常返回），
+// 所以比起只发替换探针，多花的是字节数而不是往返次数；
+// 原先「单词单翻」是单独的第二轮请求，合并后省掉一次往返。
+//
+// 为什么替换探针比哨兵好：哨兵是往句中**插入异物**（会重新断句），
+// 替换是**换掉一个词的语义**（句法结构不变）。实测 `pick` → 差分正是「铁镐」。
+//
+// 收严三道闸（tools/probe-guard.js 调的，都是为了让误报为 0）：
+//   · 候选必须**字面出现在原译里**（`原译.includes(候选)`）；
+//   · 候选长度 ≤ 原译长度的 50%（去掉「半句以上」的粗粒度差分，
+//     正是它让 `fare` 差出「支付你的十字转」、`went` 差出「半夜服务器」）；
+//   · 必须是中文。
+// 实测 28 句习语/技术/新闻混合语料：precision 1.00 / coverage 0.57。
+// 覆盖率不到 60% 是可以接受的 —— 定位不到就不高亮，但**绝不给错的高亮**。
+//
+// 差分兜底还要再过一条**绝对宽度上限 DIFF_MAX_ZH = 7 字**（tools/probe-dcap.js）：
+// 「≤ 原译 50%」是相对闸门，长句里会放行过宽的区间 —— 用户实报的那句 33 字字幕，
+// vintage 差出「这些老式的东西也在那里」11 字，50% 闸门（16.5）拦不住，
+// 字幕上就有半句被点亮。一个英文词在字幕里几乎不会译成 8 个以上汉字。
+// 实测 30 句：|上限| ok/bad/none | precision | coverage | 平均宽 | 最宽
+//   无上限   17/3/10  0.85  0.67  4.2   11   ← 11 字那条就是用户报的
+//   9 / 8 / 7 17/2/11  0.89  0.63  3.8    7   ← 7 与 8、9 完全同结果
+//   6        14/2/14  0.88  0.53  3.2    6
+//   4        12/1/17  0.92  0.43  2.7    4
+// 取 7：正好挡住 11 字那条，且不额外牺牲覆盖率（7/8/9 三档结果一致，
+// 取最紧的那个留余量）。精确候选不受这条限制 —— 它们是「这个词自己的译法」，
+// 本来就短，且必须字面出现在译文里。
 
-const SENT_A = '\u27E6';
-const SENT_B = '\u27E7';
-
-// 哨兵在译文里**会被 Google 弄坏**，不能靠「成对括号」匹配。
-// 实测（"…two ⟦0⟧halves⟦1⟧. …both ⟦2⟧halves⟦3⟧, …both ⟦4⟧halves⟦5⟧."）返回：
-//   "…两半⟦0⟧半⟦1⟧。 ⟦2⟧⟧3⟧底部涂上奶油，⟦4⟧⟧5⟧都涂上果酱。"
-// 即重复出现的词被去重时，Google 把「词 + 后一个哨兵的左括号」一起删掉了，
-// 于是 `⟦2⟧halves⟦3⟧` 变成 `⟦2⟧⟧3⟧`（`⟦3⟧` 少了左括号）。
-// 早期版本用 `⟦n⟧([\s\S]*?)⟦n+1⟧` 严格配对，这些坏掉的槽位匹配失败，
-// 于是 `⟦2⟧`、`⟧3⟧` 这些记号**原样漏进译文**，用户看到的就是「〖3〗」之类的乱码。
-// 修复思路：括号可能丢，但括号里的**编号几乎总被保留**，所以以编号为锚点扫描，
-// 相邻两个记号之间的文本就是那个槽位的内容；扫不到内容的槽位就放弃高亮（不猜）。
-const TOKEN_RE = /[\u27E6\u27E7]?\s*(\d+)\s*[\u27E6\u27E7]/g;
-
-/** 扫描译文里所有哨兵记号（容忍括号被删/被替换），按出现顺序返回 {idx, start, end} */
-function scanTokens(raw) {
-  const out = [];
-  TOKEN_RE.lastIndex = 0;
-  let m;
-  while ((m = TOKEN_RE.exec(raw))) {
-    out.push({ idx: Number(m[1]), start: m.index, end: m.index + m[0].length });
-  }
-  return out;
+/** 生成等长的无意义串：把词换掉但保持句子长度，减少 Google 改动的诱因 */
+function fillerFor(word) {
+  const w = String(word || '');
+  const seeds = ['zqx', 'qwz', 'vbk'];
+  const s = seeds[w.length % seeds.length];
+  return s + 'v'.repeat(Math.max(1, w.length - s.length));
 }
 
-/** 去掉残留的哨兵括号字符与零宽字符（数字由记号扫描负责消费，不会走到这里） */
-function stripMarkers(raw) {
-  return stripInvisible(String(raw == null ? '' : raw)).replace(/[\u27E6\u27E7]/g, '');
+/** 去空白与标点，用于「候选是否字面出现在原译里」的比较 */
+const ALIGN_PUNCT_RE = /[，。！？、；：""''（）《》·…—!?,.;:()"'\s\u3000\u200B-\u200F\u2060\uFEFF\u00AD\u00A0]/g;
+
+/** 同一组字符的非全局版本：逐字符判断时必须用它，否则 lastIndex 会串味 */
+const ALIGN_CHAR_RE = /[，。！？、；：""''（）《》·…—!?,.;:()"'\s\u3000\u200B-\u200F\u2060\uFEFF\u00AD\u00A0]/;
+
+function alignNorm(s) {
+  return String(s == null ? '' : s).replace(ALIGN_PUNCT_RE, '');
+}
+
+/** 最长公共前缀/后缀之外的中间那段：`原译 → 替换译` 被改写的区域 */
+function diffMid(P, Q) {
+  let p = 0;
+  while (p < P.length && p < Q.length && P[p] === Q[p]) p++;
+  let s = 0;
+  while (s < P.length - p && s < Q.length - p && P[P.length - 1 - s] === Q[Q.length - 1 - s]) s++;
+  return { pre: p, suf: s, mid: P.slice(p, P.length - s) };
+}
+
+/**
+ * 取窗口探针：目标词左右相邻的「纯字母词」窗口。
+ *
+ * 为什么需要它：单词单独翻会丢掉搭配语境 —— `iron pick` 里的 `pick` 单翻是
+ * 「挑选」，而整句译成「铁镐」；带上左边的 `iron` 再翻就得到「铁镐」。
+ * 反过来 `cloud` 单翻「云」够用，带上窗口变成「在云端」反而更长。
+ * 所以窗口和单词两个探针**都要发**，最后按「谁最短且落在主译文里」挑。
+ *
+ * 三条硬约束（tools/probe-winhit.js、probe-pair.js、probe-pair2.js 实测得出）：
+ *
+ * 1. **窗口只能由字母词组成、用单空格连接**。最初的实现是「左右各 r 个
+ *    token」，token 里同时含空格与标点，`halves` 左右各 1 个 token 得到的是
+ *    `"halves."` —— 不含空格，被调用处的 `includes(' ')` 门整条丢弃。
+ *
+ * 2. **绝不能把标点带进来**。把 r 调大能让窗口含空格，但 `"two halves. Cream"`
+ *    会把**下一句开头**也卷进来，翻译成「两半。奶油」，不是主译文的字面子串，
+ *    照样落空。所以窗口边界必须落在词上，且跨句时直接不生成。
+ *
+ * 3. **左右两侧分开给**。11 句实测的命中率（翻出的中文是否字面出现在主译文里）：
+ *      左邻+词（`iron pick`）  9/11 = 0.82
+ *      词单独（`pick`）        7/11 = 0.64
+ *      词+右邻（`blunt instrument`）1/8 = 0.13
+ *      左+词+右               1/8 = 0.13
+ *    右侧单独用几乎没用（`cloud these` → 「云这些」），但它能救句子开头的词
+ *    （没有左邻），所以三个形状**都发**，由 pickCandidate 挑最短且能定位的那个。
+ *    左邻 + 单词的并集已达 10/11，`commit` 是唯一三者皆空的词。
+ *
+ * 用正则切词而不是 split(' ')：原文里有 `16:9`、`don't`、`wordbook.` 这类
+ * 带标点或数字的形态，按空格切会把它们粘错。
+ */
+const WINDOW_BREAK_RE = /[.!?;:。！？；：]/;
+function wordWindows(sentence, surface) {
+  const s = String(sentence || '');
+  const target = String(surface || '').toLowerCase();
+  const re = /[A-Za-z][A-Za-z'’-]*/g;
+  const words = [];
+  let m;
+  while ((m = re.exec(s))) words.push({ t: m[0], at: m.index, end: m.index + m[0].length });
+  const gi = words.findIndex((w) => w.t.toLowerCase() === target);
+  if (gi < 0) return [];
+  // 两个词之间的原文含句子边界时，不能把它们拼进同一个窗口
+  const gapOk = (a, b) => !WINDOW_BREAK_RE.test(s.slice(words[a].end, words[b].at));
+  const hasL = gi > 0 && gapOk(gi - 1, gi);
+  const hasR = gi < words.length - 1 && gapOk(gi, gi + 1);
+  const out = [];
+  if (hasL) out.push(words[gi - 1].t + ' ' + words[gi].t);
+  if (hasR) out.push(words[gi].t + ' ' + words[gi + 1].t);
+  if (hasL && hasR) out.push(words[gi - 1].t + ' ' + words[gi].t + ' ' + words[gi + 1].t);
+  return [...new Set(out)];
+}
+
+/**
+ * 在候选集合里选出最可信的高亮译文；全不可信时返回 null。
+ *
+ * 选择规则（依据 tools/probe-choice.js 的 20 句实测）：
+ *   · 候选必须含中文、且**字面出现在主译文里**（否则位置上会框错地方）；
+ *   · 候选必须**严格短于**差分区间 —— 差分区间是「整个被重写的结构」，
+ *     而我们要的是其中属于该词的那一小段；不比它短就说明没有提供新信息；
+ *   · 满足条件的里取**最短**的那个：越短越接近「这个词本身的译法」，
+ *     `pick` 的窗口候选「铁镐」比差分「现在是制作铁镐」更接近事实。
+ *
+ * 注意这里**不比较语义**，因为主译文就是屏幕上显示的东西 ——
+ * 只要候选是从主译文里原样切出来的、且足够短，它和用户看到的字就一致。
+ */
+function pickCandidate(plain, cands, diffZh) {
+  const nDiff = alignNorm(diffZh);
+  let best = null;
+  for (const raw of cands) {
+    const v = String(raw || '').trim();
+    if (!v) continue;
+    const nv = alignNorm(v);
+    if (!nv || nv.length < 1) continue;
+    if (!/[\u4e00-\u9fff]/.test(v)) continue;
+    if (!plain.includes(v)) continue; // 必须原样出现在主译文里
+    if (nv.length >= nDiff.length) continue; // 必须真的比差分更窄
+    if (!best || nv.length < alignNorm(best).length) best = v;
+  }
+  return best;
 }
 
 // >>> WORD_FORMS_BEGIN  (本段在 subtitles.js 与 bg.js 里各有一份，内容必须一致，tools/test-forms.js 会逐行比对)
@@ -808,43 +940,31 @@ function matchSaved(rawWord, set) {
   return null;
 }
 
-/** 把 text 里出现在 wordSet 中的单词包上哨兵，返回 {marked, slots} */
-function markWords(text, wordSet) {
+/**
+ * 找出 text 里命中生词本的那些词及其位置（**不改动 text**）。
+ * 返回 [{word, surface, start, end}]，word 是生词本里的规范词，surface 是字幕里的词形。
+ */
+function findWordHits(text, wordSet) {
   // wordSet 可能是 Set，也可能是从消息里传来的数组（JSON 不支持 Set）。
-  // 早期只判 .size，数组的 size 是 undefined 会直接跳过标记，导致整条对齐链静默失效。
+  // 早期只判 .size，数组的 size 是 undefined 会直接跳过匹配，导致整条对齐链静默失效。
   const set =
     wordSet instanceof Set
       ? wordSet
       : Array.isArray(wordSet)
       ? new Set(wordSet.map((w) => String(w).toLowerCase()))
       : null;
-  const slots = [];
-  if (!set || !set.size) return { marked: text, slots };
+  if (!set || !set.size) return [];
   const hits = [];
   const re = /[A-Za-z][A-Za-z'’-]*/g;
   let m;
   while ((m = re.exec(text))) {
     // 词形匹配：beverages 要能命中生词本里的 beverage。
-    // slot.word 记**生词本里那个词**（不是字幕里的词形），
+    // word 记**生词本里那个词**（不是字幕里的词形），
     // 这样点中文高亮时打开的是已收藏词条的卡片，而不是一个「未收藏」的复数形式。
     const canon = matchSaved(m[0], set);
-    if (canon) {
-      hits.push({ start: m.index, end: m.index + m[0].length, word: canon });
-    }
+    if (canon) hits.push({ word: canon.toLowerCase(), surface: m[0], start: m.index, end: m.index + m[0].length });
   }
-  if (!hits.length) return { marked: text, slots };
-
-  let out = '';
-  let i = 0;
-  for (const h of hits) {
-    out += text.slice(i, h.start);
-    const idx = slots.length * 2;
-    out += `${SENT_A}${idx}${SENT_B}${text.slice(h.start, h.end)}${SENT_A}${idx + 1}${SENT_B}`;
-    slots.push({ word: h.word.toLowerCase(), start: h.start });
-    i = h.end;
-  }
-  out += text.slice(i);
-  return { marked: out, slots };
+  return hits;
 }
 
 /**
@@ -869,186 +989,223 @@ function looseWordRe(word, flags = 'gi') {
   return new RegExp(chars.join('[\\u200B-\\u200F\\u2060\\uFEFF\\u00AD]*'), flags);
 }
 
-/** 从带哨兵的译文里抽出每个 slot 的中文，并给出清洗后的纯译文。
+/**
+ * 规范化后的子串定位：在 hay 里找 needle（两者都按 alignNorm 忽略标点空白），
+ * 返回原文坐标系下的 {start, end}；找不到返回 null。
  *
- * 不依赖「成对括号」（Google 会删掉重复词旁的一个括号，见 TOKEN_RE 上方注释）：
- *   ① 扫描所有记号；
- *   ② 相邻两个记号之间的文本 = 前一个槽位的译文；
- *   ③ 内容为空或夹着别的括号 → 该槽位被引擎吃掉，放弃高亮（绝不猜）；
- *   ④ 清洗时把**记号整体**（含编号）和落单括号一起删掉，
- *      否则 `⟦2⟧⟧3⟧` 里的数字会变成译文里的 "23"。
+ * 单独探针给出的是「该词自己的译文」，它不一定和原译里那段**逐字相同**
+ * （例如原文「铁镐」而单翻给「镐」），所以不能直接 indexOf 原文，
+ * 要在规范化后的字符串上找，再映射回原文坐标。
  */
-function parseMarked(out, slots) {
-  // 先清掉零宽字符再做任何位置计算 —— 统一坐标系，
-  // 否则「记号位置」和「最终文本位置」会差若干个看不见的字符。
-  out = stripInvisible(out);
-  const tokens = scanTokens(out);
-  const spans = slots.map((s) => ({ word: s.word, zh: null, start: -1, end: -1 }));
-
-  // ---- 收集要删除的区间：记号本身 + 任何落单的括号字符 ----
-  const cuts = tokens.map((t) => ({ at: t.start, end: t.end }));
-  for (let i = 0; i < out.length; i++) {
-    const ch = out[i];
-    if (ch === SENT_A || ch === SENT_B) cuts.push({ at: i, end: i + 1 });
+function findNormalized(hay, needle) {
+  const norm = [];
+  const map = []; // norm[i] 对应 hay 里的下标
+  for (let i = 0; i < hay.length; i++) {
+    // 用非全局版本测单字符：带 g 的正则 test() 会推进 lastIndex，
+    // 隔着调用共享状态，漏掉字符后位置映射整体错位。
+    if (ALIGN_CHAR_RE.test(hay[i])) continue;
+    norm.push(hay[i]);
+    map.push(i);
   }
-  cuts.sort((a, b) => a.at - b.at);
-  const merged = [];
-  for (const c of cuts) {
-    const last = merged[merged.length - 1];
-    if (last && c.at <= last.end) last.end = Math.max(last.end, c.end);
-    else merged.push({ at: c.at, end: c.end });
-  }
-  // raw 坐标 → 清洗后坐标
-  const adjust = (pos) => {
-    let d = 0;
-    for (const c of merged) {
-      if (c.at >= pos) break;
-      d += Math.min(c.end, pos) - c.at;
-    }
-    return pos - d;
-  };
-  let clean = '';
-  let cursor = 0;
-  for (const c of merged) {
-    clean += out.slice(cursor, c.at);
-    cursor = c.end;
-  }
-  clean += out.slice(cursor);
-
-  // ---- 槽位内容：只接受「左记号 + 紧邻的右记号」这一对 ----
-  for (let t = 0; t < tokens.length - 1; t++) {
-    const open = tokens[t];
-    const close = tokens[t + 1];
-    if (open.idx % 2 !== 0) continue; // 只从槽位的左记号起算（idx = slot*2）
-    if (close.idx !== open.idx + 1) continue; // 右记号必须紧邻，否则结构已坏
-    const slot = open.idx >> 1;
-    if (slot < 0 || slot >= slots.length) continue;
-    const body = out.slice(open.end, close.start);
-    if (!body.trim()) continue; // 词被引擎去重掉了（`⟦2⟧⟧3⟧`）
-    if (/[\u27E6\u27E7]/.test(body)) continue; // 内容里还有括号 → 错位，放弃
-    if (/^\s*\d+\s*$/.test(body)) continue; // 只剩编号，说明词没翻出来
-    spans[slot] = {
-      word: slots[slot].word,
-      zh: body.trim(),
-      start: adjust(open.end),
-      end: adjust(close.start),
-    };
-  }
-
-  return { clean, spans };
+  const h = norm.join('');
+  const n = alignNorm(needle);
+  if (!n) return null;
+  const at = h.indexOf(n);
+  if (at < 0) return null;
+  return { start: map[at], end: map[at + n.length - 1] + 1 };
 }
 
-/** 把带哨兵的句子翻成译文 + 词对齐位置；引擎不支持标记时优雅退化为纯译文 */async function translateAligned(texts, wordSets, source, target) {
+/**
+ * 差分兜底的**绝对宽度上限**（单位：去标点后汉字数）。
+ *
+ * acceptSpan 的「≤ 原译 50%」是相对闸门，长句里会放行过宽的区间：
+ * 用户实报的那句 33 字字幕，vintage 差出「这些老式的东西也在那里」11 个字，
+ * 50% 闸门 = 16.5 拦不住，字幕上就有半句被点亮。
+ * 一个英文词在字幕里几乎不会译成 8 个以上汉字，所以再加一条绝对值。
+ *
+ * 实测 30 句（tools/probe-dcap.js，精确候选优先 + 差分加此上限）：
+ *   无上限   覆盖 0.67 / 平均 4.2 字 / 最宽 11 字 ← 11 字那条就是用户报的
+ *   9 / 8 / 7 覆盖 0.63 / 平均 3.8 字 / 最宽 7 字 ← 三档结果完全一致
+ *   6        覆盖 0.53 / 平均 3.2 字
+ *   4        覆盖 0.43 / 平均 2.7 字
+ * 7/8/9 三档结果相同，取最紧的 7 留余量。
+ * **精确候选（单词/窗口翻译）不受这条限制** —— 它们是「这个词自己的译法」，
+ * 本来就短，且必须字面出现在译文里，不会像差分那样吞掉半句。
+ */
+const DIFF_MAX_ZH = 7;
+
+/**
+ * 校验一个候选高亮区间是否可信。三条闸门缺一不可：
+ *   · 必须含中文（否则会在中文字幕里高亮一块英文）；
+ *   · 长度不得超过原译的一半（粗粒度差分才会吐出「半句」这种垃圾）；
+ *   · 不能是空白或单字标点。
+ */
+function acceptSpan(plain, cand) {
+  if (!cand) return false;
+  const zh = String(cand).trim();
+  if (!zh) return false;
+  if (!/[\u4e00-\u9fff]/.test(zh)) return false;
+  if (alignNorm(zh).length < 1) return false;
+  if (zh.length > plain.length * 0.5) return false;
+  return true;
+}
+
+/**
+ * 把若干句子翻成译文 + 生词中文高亮区间。
+ *
+ * 主译文一律是**原句的正常翻译**，不带任何记号 —— 这是 bug 18 的根治点。
+ * 对齐信息全部来自旁路探针（见本文件顶部「译文对齐」注释块）：
+ *   第 1 轮：替换探针（把词换成长度相近的无意义串）→ 与原译做前后缀差分；
+ *   第 2 轮：仅对第 1 轮没定位到的词，用「单词单翻」再试一次。
+ *
+ * spans[i] 里每项 {word, zh, start, end}，start/end 是 texts[i] 内的字符下标。
+ * 定位不到就是空数组 —— 宁可不亮，也不亮错位置。
+ */
+async function translateAligned(texts, wordSets, source, target) {
   const tl = target || 'zh-CN';
-  // 对齐缓存同样必须带引擎维度（理由见 translateWithCache）。
-  // 版本号提到 al4：键结构变了（插入了引擎），旧的 al3 记录自然全部失效。
+  // 缓存键必须带引擎维度（理由见 translateWithCache）。
+  // 版本号提到 al7：窗口探针从「左右各 r 个 token」改成「只取字母词、且跨句不拼」，
+  // al6 缓存里由旧窗口算出的空 span 仍会被原样读回来（halves 那一类）。
   const engine = (await getSettings()).engine || 'google';
 
-  // ---- 1. 查缓存：对齐结果按「引擎 + 译文语言 + 原文 + 待高亮词集合」缓存 ----
-  // fallback 记录该条是否是「标记失败退回纯译文」的降级结果：
-  // 降级结果只用于当下渲染，不写入缓存，否则之后换生词也修不好（词没翻就是没翻）。
   const result = {
     texts: new Array(texts.length).fill(''),
     spans: new Array(texts.length).fill(null),
     fallback: new Array(texts.length).fill(false),
   };
   const missIdx = [];
-  const missMarked = [];
+  const hitsOf = [];
 
-  const keyOf = (i) =>
-    `${engine}|${tl}|al4|${hashStr(texts[i])}|${hashStr(
-      (Array.isArray(wordSets?.[i]) ? wordSets[i] : wordSets?.[i] ? [...wordSets[i]] : [])
-        .map((w) => String(w).toLowerCase())
-        .sort()
-        .join(',')
-    )}`;
+  const wordsKey = (i) =>
+    (Array.isArray(wordSets?.[i]) ? wordSets[i] : wordSets?.[i] ? [...wordSets[i]] : [])
+      .map((w) => String(w).toLowerCase())
+      .sort()
+      .join(',');
+
+  const keyOf = (i) => `${engine}|${tl}|al7|${hashStr(texts[i])}|${hashStr(wordsKey(i))}`;
 
   for (let i = 0; i < texts.length; i++) {
-    const mk = markWords(texts[i], wordSets?.[i]);
-    // 缓存键版本号 al4：早期版本会把「标记失败退回纯译文」的结果也写进来，
-    // 那些记录的 spans 为空、译文里还夹着英文原词，换版本号即可整体绕过旧脏数据。
     const hit = await idbGet('translations', keyOf(i));
     if (hit && typeof hit.text === 'string' && hit.text.trim() && Array.isArray(hit.spans)) {
       result.texts[i] = hit.text;
       result.spans[i] = hit.spans;
     } else {
       missIdx.push(i);
-      missMarked.push(mk);
+      hitsOf.push(findWordHits(texts[i], wordSets?.[i]));
     }
   }
-
   if (!missIdx.length) return result;
 
-  // ---- 2. 需要对齐的句子先打标记；没有待高亮词的句子照常翻 ----
-  const anySlots = missMarked.some((mk) => mk.slots.length);
-  let outs = null;
-  if (anySlots) {
+  // ---- 1. 主译文：原句直接翻，**一个字符都不改** ----
+  const plainOut = await translateBatch(
+    missIdx.map((i) => texts[i]),
+    source,
+    tl
+  );
+  for (let k = 0; k < missIdx.length; k++) {
+    const i = missIdx[k];
+    result.texts[i] = stripInvisible(plainOut[k] || '');
+    result.spans[i] = [];
+  }
+
+  // ---- 2. 发探针（替换 / 单词 / 窗口一次问完）----
+  // 同一句里同一个词出现多次时，逐处替换会得到不同的探针句；
+  // 但多个待查词同时替换会互相干扰差分，所以**每处替换单独成一句**。
+  //
+  // 三路探针共用一次批量请求（Google 一次可带几十个 q，实测 80 个也正常），
+  // 所以多发两类候选几乎不增加往返次数，只增加一点字节数。
+  const probeTexts = [];
+  const probeMeta = []; // {k(对应 missIdx), hitIdx, text}
+  const wordProbes = new Map(); // 小写词 → 单词探针原文（去重后只发一次）
+  const winProbes = new Map(); // 窗口文本 → true
+  for (let k = 0; k < missIdx.length; k++) {
+    const i = missIdx[k];
+    const plain = result.texts[i];
+    if (!plain || !/[\u4e00-\u9fff]/.test(plain)) continue;
+    hitsOf[k].forEach((h, hi) => {
+      const probe = texts[i].slice(0, h.start) + fillerFor(h.surface) + texts[i].slice(h.end);
+      probeTexts.push(probe);
+      probeMeta.push({ k, hi, text: probe });
+      const lw = String(h.word).toLowerCase();
+      if (!wordProbes.has(lw)) wordProbes.set(lw, lw);
+      for (const win of wordWindows(texts[i], h.surface)) winProbes.set(win, true);
+    });
+  }
+
+  // 单词与窗口探针跟替换探针拼在同一个数组里发出去，回来再按位置切开。
+  const extraProbes = [...wordProbes.values(), ...winProbes.keys()];
+  const allProbes = [...probeTexts, ...extraProbes];
+
+  const resolved = new Set(); // `${k}:${hi}`
+  if (allProbes.length) {
+    const uniq = [...new Set(allProbes)];
+    let outs = null;
     try {
-      outs = await translateBatch(missMarked.map((x) => x.marked), source, tl);
+      outs = await translateBatch(uniq, source, tl);
     } catch (_) {
       outs = null;
     }
-  }
+    const byProbe = new Map();
+    if (Array.isArray(outs) && outs.length === uniq.length) {
+      uniq.forEach((t, n) => byProbe.set(t, stripInvisible(outs[n] || '')));
+    }
 
-  const usable =
-    Array.isArray(outs) &&
-    outs.length === missMarked.length &&
-    missMarked.every((mk, i) => {
-      if (!mk.slots.length) return true;
-      const o = outs[i] || '';
-      // 至少第一对哨兵完整保留，才认为这一批的标记没被吃掉
-      return new RegExp(`${SENT_A}0${SENT_B}[\\s\\S]*?${SENT_A}1${SENT_B}`).test(o);
-    });
+    // 3a. 先看「替换探针」给出的差分区间（覆盖面最广，但常常偏宽）
+    const diffOf = new Map(); // `${k}:${hi}` → {start, end, zh}
+    for (const pm of probeMeta) {
+      const q = byProbe.get(pm.text);
+      if (!q) continue;
+      const plain = result.texts[missIdx[pm.k]];
+      const { pre, suf } = diffMid(plain, q);
+      let start = pre;
+      let end = plain.length - suf;
+      // 去掉差分区域两端的空白，否则高亮会带上首尾空格
+      while (start < end && /\s/.test(plain[start])) start++;
+      while (end > start && /\s/.test(plain[end - 1])) end--;
+      diffOf.set(`${pm.k}:${pm.hi}`, { start, end, zh: plain.slice(start, end) });
+    }
 
-  if (!usable) {
-    // 引擎（例如 MyMemory）把哨兵吃掉了 → 退回纯译文，中文不高亮但至少能读
-    if (anySlots) console.info('[Trace bg] 标记对齐不可用，退回纯译文');
-    const plainOut = await translateBatch(
-      missIdx.map((i) => texts[i]),
-      source,
-      tl
-    );
+    // 3b. 每个待定位的词，把「单词 / 窗口」候选与差分放在一起挑
     for (let k = 0; k < missIdx.length; k++) {
       const i = missIdx[k];
-      result.texts[i] = plainOut[k] || '';
-      result.spans[i] = [];
-      result.fallback[i] = true;
-      // 故意不写缓存：这是降级结果，写进去会让后续即使引擎恢复也一直读到它
+      const plain = result.texts[i];
+      hitsOf[k].forEach((h, hi) => {
+        const id = `${k}:${hi}`;
+        const d = diffOf.get(id);
+        const diffZh = d ? d.zh.trim() : '';
+        // 多路候选：单词单翻 + 三种窗口形状；差分本身也参与比较（它是兜底）
+        const cands = [byProbe.get(String(h.word).toLowerCase()) || ''];
+        for (const win of wordWindows(texts[i], h.surface)) cands.push(byProbe.get(win) || '');
+
+        const picked = pickCandidate(plain, cands, diffZh);
+        if (picked) {
+          // 精确候选必须能在主译文里定位到，否则位置会框错
+          const at = findNormalized(plain, picked);
+          if (at) {
+            result.spans[i].push({ word: h.word, zh: picked, start: at.start, end: at.end });
+            resolved.add(id);
+            return;
+          }
+        }
+        // 精确候选不成立 → 退回差分（要过 acceptSpan 的相对闸门 + 绝对宽度上限）
+        if (!d) return;
+        const cand = plain.slice(d.start, d.end);
+        if (!acceptSpan(plain, cand)) return;
+        // 绝对宽度上限只拦「差分」这一路：11 字那种半句级别的区间宽度虽在
+        // 50% 相对闸门内，但一个词不该占这么宽，宁可这次不亮。
+        if (alignNorm(cand).length > DIFF_MAX_ZH) return;
+        result.spans[i].push({ word: h.word, zh: cand.trim(), start: d.start, end: d.end });
+        resolved.add(id);
+      });
     }
-    return result;
   }
 
-  // ---- 3. 解析哨兵，得到纯译文 + 中文词位置 ----
+  // ---- 3. 收口：去重叠 + 最终把关 + 写缓存 ----
+  // 原第 2 轮的「单词单翻兜底」已经合并进上面的统一轮次（单词探针同批发出），
+  // 少一次网络往返，且避免两套逻辑对同一句给出不同的高亮。 
   for (let k = 0; k < missIdx.length; k++) {
     const i = missIdx[k];
-    const raw = outs[k] || '';
-    const mk = missMarked[k];
-
-    if (!mk.slots.length) {
-      result.texts[i] = stripMarkers(raw);
-      result.spans[i] = [];
-    } else {
-      const { clean, spans } = parseMarked(raw, mk.slots);
-      result.texts[i] = clean;
-      result.spans[i] = spans.filter((s) => s.zh && s.start >= 0);
-    }
-
-    // ---- 4. 兜底：哨兵之间没有译出中文（Google 偶尔把标记内的词原样保留）----
-    // 实测 "…save it to your ⟦0⟧wordbook⟦1⟧." 会原样返回英文，
-    // 但同一个词单独送翻是正常的。这里对这类槽位单独补译，再在译文里就地替换。
-    if (mk.slots.length) {
-      await repairUntranslatedSlots(result, i, texts[i], mk, tl);
-    }
-
-    // ---- 5. 最终把关：只留下真的是中文的高亮 ----
-    // 补译也可能失败（网络抖动 / 引擎就是不给译文）。这时 spans 里会留着
-    // 「zh 是英文原词」的槽位，渲染出来就是中文字幕里夹一块高亮的英文 ——
-    // 正是用户报的那个症状。宁可不高亮，也不显示一个假的高亮。
-    //
-    // 注意这一步**不能**挪进 parseMarked：parseMarked 必须保留坏槽位，
-    // 否则 repairUntranslatedSlots 就找不到该补译的词了。
-    result.spans[i] = cjkSpansOnly(result.spans[i]);
-
+    result.spans[i] = cjkSpansOnly(dedupeSpans(result.spans[i]));
     if (result.texts[i]) {
       await idbPut('translations', {
         key: keyOf(i),
@@ -1064,99 +1221,37 @@ function parseMarked(out, slots) {
 }
 
 /**
- * 只保留「真的是中文」的高亮片段。
+ * 只保留「真的是中文、位置合法」的高亮片段。
  *
- * 一个槽位如果没翻出来（zh 为空、或 zh 就是英文原词），它不能作为高亮显示 ——
- * 否则中文字幕里会夹一块高亮的英文，比不高亮更让人困惑。
+ * 一个高亮如果 zh 是英文原词，渲染出来就是中文字幕里夹一块高亮的英文 ——
+ * 比不高亮更让人困惑。宁可不高亮，也不显示一个假的高亮。
  */
 function cjkSpansOnly(spans) {
   if (!Array.isArray(spans)) return [];
   return spans.filter(
-    (s) => s && typeof s.zh === 'string' && /[\u4e00-\u9fff]/.test(s.zh) && s.start >= 0
+    (s) =>
+      s &&
+      typeof s.zh === 'string' &&
+      /[\u4e00-\u9fff]/.test(s.zh) &&
+      Number.isInteger(s.start) &&
+      Number.isInteger(s.end) &&
+      s.start >= 0 &&
+      s.end > s.start
   );
 }
 
-/**
- * 修掉「哨兵内没翻译」的槽位。
- *
- * Google 对某些句子会把 ⟦n⟧word⟦n+1⟧ 整段原样保留，导致译文里夹着英文原词。
- * 这些词单独送翻通常没问题，所以这里：
- *   ① 找出 spans 里 zh 为空（或 zh 仍是英文原词）的槽位
- *   ② 把它们单独翻一遍
- *   ③ 在已清洗的译文里找到残留的英文原词，替换成中文，并修正 spans 的位置
- */
-async function repairUntranslatedSlots(result, i, sourceText, mk, tl) {
-  const spans = result.spans[i];
-  if (!Array.isArray(spans) || !spans.length) return;
-
-  // 判断某个 slot 的译文是否其实是「没翻」：没有中文、或内容就是英文原词
-  const looksUntranslated = (s) => {
-    if (!s || !s.zh) return true;
-    const hasCjk = /[\u4e00-\u9fff]/.test(s.zh);
-    if (!hasCjk) return true;
-    // 译文里仍含英文原词（例如 "wordbook" 混在中文里）也算没翻干净。
-    // 用 looseWordRe 而不是普通正则：Google 会在字母间插零宽字符，
-    // 普通 /horizontal/ 匹配不到 horizo\u200B\u200Bntal，会漏判成「已翻译」。
-    return looseWordRe(s.word).test(s.zh);
-  };
-
-  const broken = spans.filter((s) => s.start >= 0 && looksUntranslated(s));
-  if (!broken.length) return;
-
-  // 补译这些词（一次批量，去重）
-  const uniq = [...new Set(broken.map((s) => s.word))];
-  let fixed;
-  try {
-    fixed = await translateBatch(uniq, 'en', tl || result.target || 'zh-CN');
-  } catch (_) {
-    return; // 补译失败就算了，保持原样，至少不崩
-  }
-  const dict = {};
-  uniq.forEach((w, k) => {
-    const zh = (fixed?.[k] || '').trim();
-    // 只有真的译出中文才采用，否则宁可不替换
-    if (zh && /[\u4e00-\u9fff]/.test(zh)) dict[w] = zh;
-  });
-  if (!Object.keys(dict).length) return;
-
-  // 在译文里逐个替换残留英文，并记录新位置
-  let text = result.texts[i];
-  const newSpans = [];
-  for (const s of spans) {
-    const zh = dict[s.word];
-    if (!zh || !looksUntranslated(s)) {
-      if (s.start >= 0) newSpans.push(s);
-      continue;
-    }
-    // 在当前位置附近找英文原词（大小写不敏感，容忍零宽字符）
-    const re = looseWordRe(s.word);
-    re.lastIndex = 0;
-    const m = re.exec(text);
-    if (!m) {
-      // 找不到就不高亮，避免错位
-      continue;
-    }
-    const before = text.slice(0, m.index);
-    const after = text.slice(m.index + m[0].length);
-    text = before + zh + after;
-    newSpans.push({ word: s.word, zh, start: m.index, end: m.index + zh.length });
-  }
-
-  // 替换会让后面 span 的位置变化，重新按出现顺序算一遍
-  result.texts[i] = text;
-  result.spans[i] = recomputeSpanOffsets(text, newSpans);
-}
-
-/** 按 span 的 word 在最终译文里出现顺序，重新计算 start/end（去重叠） */
-function recomputeSpanOffsets(text, spans) {
+/** 按位置排序并丢掉互相重叠的区间（同一句里多个词可能差出同一段译文） */
+function dedupeSpans(spans) {
+  if (!Array.isArray(spans)) return [];
+  const sorted = spans
+    .filter((s) => s && Number.isInteger(s.start) && Number.isInteger(s.end) && s.end > s.start)
+    .sort((a, b) => a.start - b.start || b.end - a.end);
   const out = [];
-  let cursor = 0;
-  const sorted = spans.filter((s) => s && s.word && s.zh).sort((a, b) => a.start - b.start);
+  let cursor = -1;
   for (const s of sorted) {
-    const at = text.indexOf(s.zh, cursor);
-    if (at < 0) continue;
-    out.push({ word: s.word, zh: s.zh, start: at, end: at + s.zh.length });
-    cursor = at + s.zh.length;
+    if (s.start < cursor) continue;
+    out.push(s);
+    cursor = s.end;
   }
   return out;
 }
@@ -2271,8 +2366,15 @@ globalThis.__traceDebug = {
   googleChunked,
   myMemoryAll,
   translateAligned,
-  markWords,
-  parseMarked,
+  /** 找出字幕里命中生词本的词及位置（不改动原文） */
+  findWordHits,
+  /** 旁路探针的内部件：等长填充串、规范化、前后缀差分 */
+  fillerFor,
+  alignNorm,
+  diffMid,
+  findNormalized,
+  acceptSpan,
+  dedupeSpans,
   /** 零宽字符处理：Google 会在英文词中间插 U+200B，导致所有正则匹配不到 */
   stripInvisible,
   looseWordRe,

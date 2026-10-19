@@ -65,10 +65,17 @@ function check(name, ok, extra) {
     [0.0, 3.0, 'look. This is proper vintage.'],
     [3.0, 2.0, 'This is proper vintage.'],
   ];
-  // 第二阶段用：immediately 的词典义与语境义确实不同
+  // 第二阶段用：语境义与词典直译**差别足够大**，断言才稳定。
+  //
+  // 早先这里用 immediately：词典义「立即地」、这句里的语境义「立即」，
+  // 两者只差一个「地」，而引擎偶尔直接翻成「立即地」→ 去重逻辑判定
+  // 「两个答案相同」把提示清掉 → D18 随机失败（全量跑时偶现，单跑不现）。
+  //
+  // pick 的差别是结构性的：词典义「挑选」、这句里是「铁镐」（iron pick 是复合名词）。
+  // 有 probe-pair2.js 实测支撑：「iron pick」→「铁镐」确实是主译文的字面子串。
   const CUES2 = [
-    [0.0, 3.0, 'He was immediately brought a cappuccino.'],
-    [3.0, 2.0, 'She immediately knew.'],
+    [0.0, 3.0, 'He grabbed an iron pick and started digging.'],
+    [3.0, 2.0, 'She grabbed another iron pick.'],
   ];
   await ctx.route('https://www.youtube.com/**', async (route) => {
     const u = route.request().url();
@@ -331,13 +338,72 @@ function check(name, ok, extra) {
   });
   await page.reload({ waitUntil: 'domcontentloaded' });
   await page.waitForSelector('.trace-sub-orig', { timeout: 20000 });
-  // 等生词高亮 + 对齐译文就绪（zhSpans 要等 realign 那一轮才回来）
-  await page.waitForFunction(
-    () => {
-      const t = document.querySelector('.trace-sub-trans');
-      return t && t.querySelector('.trace-saved-zh');
-    },
-    { timeout: 30000 }
+  // 只等「这个词在原文里被标成已收藏」——这一步由 loadWordSet 驱动，必然发生。
+  //
+  // 不能等 `.trace-saved-zh`（译文侧的高亮片段）。bug 18 修复后译文侧高亮
+  // 走的是「旁路探针定位」，定位不到就不高亮：
+  //   "This is proper vintage." → "这是正确的年份。"
+  // vintage 在这里被译成「年份」，单词探针给「优质的」、窗口探针也定位不到，
+  // 差分又过不了 50% 闸门 → 诚实结果就是「不高亮」。
+  // 旧版代码在这句里会输出「这是正确的**优质的**。」——那句话本身才是 bug 18
+  // 的产物（把词典义塞进句子），不能拿它的行为当基线。
+  let d14ok = false;
+  for (let i = 0; i < 40; i++) {
+    await page.waitForTimeout(400);
+    const st = await page.evaluate(() => {
+      const o = document.getElementById('trace-sub-overlay');
+      const v = document.querySelector('video');
+      return {
+        orig: (document.querySelector('.trace-sub-orig')?.textContent || '').trim(),
+        words: [...(o?.querySelectorAll('.trace-word') || [])].map((n) => ({
+          w: n.dataset.w,
+          saved: n.classList.contains('trace-saved'),
+        })),
+        t: v ? +v.currentTime.toFixed(2) : null,
+        ended: v ? v.ended : null,
+        paused: v ? v.paused : null,
+      };
+    });
+    if (i < 6 || st.words.length === 0) {
+      console.log(`D14 轮询[${i}]`, JSON.stringify(st));
+    }
+    if (st.words.some((w) => w.saved && w.w === 'vintage')) {
+      d14ok = true;
+      break;
+    }
+    if (st.ended) {
+      console.log('D14 视频已结束，重新播放');
+      await page.evaluate(() => window.__mockPlay && window.__mockPlay());
+    }
+  }
+  if (!d14ok) console.log('D14 始终没看到 vintage 的已收藏标记');
+  // 不要在采样前再等 realign —— 夹具字幕总长只有 5 秒，任何额外等待都可能
+  // 让视频播过当前 cue，采样时 .trace-word 已经换成下一句甚至清空。
+  // 直接把「此刻屏幕上是什么」记下来。
+
+  const align2 = await page.evaluate(() => {
+    const o = document.getElementById('trace-sub-overlay');
+    const zh = [...(o?.querySelectorAll('.trace-saved-zh') || [])].map((n) => ({
+      w: n.dataset.w,
+      text: n.textContent,
+    }));
+    const word = [...(o?.querySelectorAll('.trace-word.trace-saved') || [])].map(
+      (n) => n.dataset.w
+    );
+    return {
+      zh,
+      word,
+      plainZh: (document.querySelector('.trace-sub-trans')?.textContent || '').trim(),
+    };
+  });
+  // 高亮是「可以没有」的，但只要出现就必须与译文一致（不能亮一个译文里没有的词）
+  const alignOk =
+    align2.zh.length === 0 ||
+    align2.zh.every((z) => align2.plainZh.includes(z.text));
+  check(
+    'D14 已收藏的词在原文里高亮，且译文侧高亮若存在必与译文一致',
+    align2.word.includes('vintage') && alignOk,
+    { word: align2.word, zhCount: align2.zh.length, align: alignOk, plainZh: align2.plainZh }
   );
 
   const clicked2 = await page.evaluate(() => {
@@ -416,26 +482,83 @@ function check(name, ok, extra) {
   });
   await sw.evaluate(async () => {
     const D = globalThis.__traceDebug;
-    await D.addWord({ word: 'immediately', display: 'immediately', zh: '立即地' });
+    await D.addWord({ word: 'pick', display: 'pick', zh: '挑选' });
   });
   await page.reload({ waitUntil: 'domcontentloaded' });
   await page.waitForSelector('.trace-sub-orig', { timeout: 20000 });
-  await page.waitForFunction(
-    () => {
-      const t = document.querySelector('.trace-sub-trans');
-      return t && t.querySelector('.trace-saved-zh');
-    },
-    { timeout: 30000 }
-  );
-  const clicked3 = await page.evaluate(() => {
-    const el = [...document.querySelectorAll('.trace-word')].find(
-      (n) => (n.textContent || '').toLowerCase().replace(/[^a-z]/g, '') === 'immediately'
-    );
-    if (!el) return false;
-    el.click();
-    return true;
-  });
-  check('D17 immediately 已收藏且在字幕里高亮可点', clicked3);
+  // 立刻暂停：CUES2 只覆盖 0–5 秒，而这一段要等「原文高亮 + 查词卡片」好几秒。
+  // 不暂停就必然播过最后一条 cue，字幕整体清空、点不到词（这才是 D17 超时的真因）。
+  await page.evaluate(() => window.__mockPause && window.__mockPause());
+  // 同 D14：只等原文侧标记，译文侧高亮允许缺席（定位不到就不亮是对的）
+  let sawImm = false;
+  for (let i = 0; i < 40; i++) {
+    const st = await page.evaluate(() => {
+      const o = document.getElementById('trace-sub-overlay');
+      const v = document.querySelector('video');
+      return {
+        t: v ? +v.currentTime.toFixed(2) : null,
+        paused: v ? v.paused : null,
+        orig: (o?.querySelector('.trace-sub-orig')?.textContent || '').slice(0, 50),
+        words: [...(o?.querySelectorAll('.trace-word') || [])].map((n) => n.dataset.w),
+        saved: [...(o?.querySelectorAll('.trace-word.trace-saved') || [])].map(
+          (n) => n.dataset.w
+        ),
+      };
+    });
+    console.log('D17 轮询', i, JSON.stringify(st));
+    if (st.saved.includes('pick')) {
+      sawImm = true;
+      break;
+    }
+    await page.waitForTimeout(500);
+  }
+  if (!sawImm) {
+    check('D17 pick 已收藏且在字幕里高亮可点', false, { reason: 'no saved highlight' });
+    await ctx.close();
+    finish();
+    return;
+  }
+  // 关键：一拿到高亮就**暂停**时间轴。
+  // 夹具用 canvas.captureStream 喂 video，MediaStream 不支持 seek、也永远不会 ended，
+  // currentTime 一路涨过最后一条 cue 之后字幕就整体清空再也不回来。
+  // 早先这里还多等了一个 8 秒的 waitForFunction（等译文侧高亮），那 8 秒正好把
+  // 5 秒长的 cue 播完 → 点不到词 → D17 与 D18 连锁失败。
+  // 现在：等到原文高亮即暂停，时间轴钉在 cue 内，后面怎么等都不会跑掉。
+  await page.evaluate(() => window.__mockPause && window.__mockPause());
+
+  // 译文侧的语境义（zhSpans）要等 realign 回来才有，而 D18 断言正是读它。
+  // 时间轴已暂停，可以安心等；最多等 12 秒（探针批次 + 缓存写入）。
+  let spanReady = null;
+  for (let i = 0; i < 24; i++) {
+    spanReady = await page.evaluate(() => {
+      const o = document.getElementById('trace-sub-overlay');
+      return {
+        zh: (o?.querySelector('.trace-sub-trans')?.textContent || '').slice(0, 60),
+        spans: [...(o?.querySelectorAll('.trace-saved-zh') || [])].map((n) => ({
+          w: n.dataset.w,
+          t: n.textContent,
+        })),
+      };
+    });
+    if (spanReady.spans.some((s) => s.w === 'pick')) break;
+    await page.waitForTimeout(500);
+  }
+  console.log('D18 语境义等待结果', JSON.stringify(spanReady));
+
+  let clicked3 = false;
+  for (let i = 0; i < 25; i++) {
+    clicked3 = await page.evaluate(() => {
+      const el = [...document.querySelectorAll('.trace-word')].find(
+        (n) => (n.textContent || '').toLowerCase().replace(/[^a-z]/g, '') === 'pick'
+      );
+      if (!el) return false;
+      el.click();
+      return true;
+    });
+    if (clicked3) break;
+    await page.waitForTimeout(400);
+  }
+  check('D17 pick 已收藏且在字幕里高亮可点', clicked3);
   await page.waitForFunction(
     () => {
       const pop = document.getElementById('trace-word-popup');

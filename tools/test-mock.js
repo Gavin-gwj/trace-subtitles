@@ -182,8 +182,17 @@ const WATCH = `${ORIGIN}/watch?v=${fx.VIDEO_ID}`;
     // 否则真实时间轴推进会让字幕换句，断言目标词就不在屏幕上了。
     await page.evaluate(() => window.__mockPause && window.__mockPause());
     await page.waitForTimeout(400);
-    const w = await page.$('#trace-sub-overlay .trace-word');
+    // **必须点一个实义词**：旧版点的是 `.trace-word` 里的第一个词，
+    // 这一句第一个词是 "So" —— 虚词，译文里对应「那么」，
+    // 差分/单词/窗口三种探针都无法在「那么今天我们就来谈谈…」里可靠定位它，
+    // 于是 span 为空（这是「宁可少亮不可亮错」的正确行为）。
+    // 用它来断言「中文必须高亮」等于要求扩展去猜 —— 换成 plugin（插件）这种实义词。
+    // 找不到就退回第一个词，保证测试在别的夹句上仍可运行。
+    const w =
+      (await page.$('#trace-sub-overlay .trace-word[data-w="plugin"]')) ||
+      (await page.$('#trace-sub-overlay .trace-word'));
     if (w) {
+      const clickedWord = await w.evaluate((el) => el.dataset.w || '');
       await w.click();
       // 等词典返回（最坏情况 3.5s 词典超时 + 中文翻译）
       for (let i = 0; i < 20; i++) {
@@ -235,7 +244,7 @@ const WATCH = `${ORIGIN}/watch?v=${fx.VIDEO_ID}`;
         }
 
         // ---- 高亮断言：当前字幕里该词应带 trace-saved ----
-        const savedWord = (wordTest?.word || '').toLowerCase();
+        const savedWord = (wordTest?.word || clickedWord || '').toLowerCase();
         highlight = await page.evaluate((w) => {
           const spans = [...document.querySelectorAll('#trace-sub-overlay .trace-word')];
           const hit = spans.find((s) => s.dataset.w?.toLowerCase() === w);
@@ -278,7 +287,11 @@ const WATCH = `${ORIGIN}/watch?v=${fx.VIDEO_ID}`;
         // ---- 重新点击该词：弹窗应显示"已在生词本"，而不是"加入生词本" ----
         await page.click('#trace-word-popup [data-act="close"]').catch(() => {});
         await page.waitForTimeout(300);
-        const again = await page.$('#trace-sub-overlay .trace-word');
+        // 重开卡片也必须点**同一个词**，否则点到 "So" 上弹的是 So 的词条，
+        // 那里当然还没有加入生词本，断言会误判成「生词本是假的」。
+        const again =
+          (await page.$(`#trace-sub-overlay .trace-word[data-w="${savedWord}"]`)) ||
+          (await page.$('#trace-sub-overlay .trace-word'));
         if (again) {
           await again.click();
           let reopen = null;

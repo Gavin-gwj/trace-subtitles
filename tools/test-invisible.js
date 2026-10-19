@@ -9,7 +9,10 @@
  *
  * 这个测试必须能抓住修复前的代码：
  *   - stripInvisible / looseWordRe 不存在 → 直接 FAIL
- *   - parseMarked 不清洗 → 译文里带零宽字符 → FAIL
+ *   - 译文不清洗 → 带零宽字符 → FAIL
+ *
+ * bug 18 之后对齐机制整体换掉了（不再往句子里插记号），
+ * 所以 S5 一组改为验证「探针内部件都不会被零宽字符污染位置」。
  */
 const path = require('path');
 const fs = require('fs');
@@ -104,8 +107,8 @@ const ZW = '\u200B'; // 零宽空格
   check('S1c looseWordRe 能跨零宽字符命中', s1.loose === true, { loose: s1.loose });
 
   // ---------------------------------------------------------------- S2
-  // 端到端：带哨兵整句送翻，返回的译文里不能有零宽字符，
-  // 且如果 Google 把词原样留在译文里，repair 逻辑必须能补上中文。
+  // 端到端：整句送翻，返回的译文里不能有零宽字符。
+  // （bug 18 之后不再插入任何记号，主译文就是原句的正常翻译。）
   const sentence =
     "Reels. For this example, I'm going with 16:9 because I want to create a horizontal video. So, I'll select 16:9.";
   const s2 = await D('translateAligned', [sentence], [['horizontal']], 'en', 'zh-CN');
@@ -139,33 +142,73 @@ const ZW = '\u200B'; // 零宽空格
   check('S4 普通句子翻译不受影响', s4.ok && /[\u4e00-\u9fff]/.test(out4), { text: out4 });
 
   // ---------------------------------------------------------------- S5
-  // markWords + parseMarked 往返：模拟引擎在词中间插零宽字符的返回
+  // 旁路探针的内部件（bug 18 改造后，不再有 markWords/parseMarked）：
+  // 同一件事仍然要验证 —— 零宽字符不能污染「位置」计算。
   const s5 = await sw.evaluate((zw) => {
     const d = globalThis.__traceDebug;
-    const text = 'I want to create a horizontal video.';
-    const mk = d.markWords(text, new Set(['horizontal']));
-    // 伪造 Google 的返回：把英文原词塞回哨兵之间，并插入零宽字符
-    const fake = mk.marked.replace('horizontal', 'horizo' + zw + zw + 'ntal');
-    const parsed = d.parseMarked(fake, mk.slots);
-    return { marked: mk.marked, slots: mk.slots.length, clean: parsed.clean, spans: parsed.spans };
+    const dirty = '我想创建一个 horizo' + zw + zw + 'ntal 视频。';
+    // ① fillerFor 必须保持长度，否则探针句里词的偏移会变
+    const f = d.fillerFor('pick');
+    // ② 前后缀差分：只在「铁镐 → 熨斗」处断开
+    const dm = d.diffMid('这是制作铁镐的好时机。', '这是制作熨斗的好时机。');
+    // ③ 规范化定位要能跨过零宽字符与标点，并且映射回原文坐标
+    const at = d.findNormalized(dirty, 'horizontal');
+    return {
+      hasFns:
+        typeof d.fillerFor === 'function' &&
+        typeof d.diffMid === 'function' &&
+        typeof d.findNormalized === 'function',
+      filler: f,
+      fillerLen: f === 'pick' ? 0 : f.length,
+      mid: dm.mid,
+      // 原文坐标系下切出来的片段，应当正好是那个脏词
+      slice: at ? dirty.slice(at.start, at.end) : null,
+    };
   }, ZW);
-  check('S5 parseMarked 输出不含零宽字符', s5.clean === 'I want to create a horizontal video.', s5);
-  // 注意：parseMarked **必须**保留坏槽位（zh 是英文），否则 repairUntranslatedSlots
-  // 就找不到该补译的词。真正的过滤发生在补译之后，用 cjkSpansOnly()。
-  const s5b = await sw.evaluate(() => {
+  check(
+    'S5 探针内部件齐全且填充串等长',
+    s5.hasFns && s5.fillerLen === 'pick'.length,
+    s5
+  );
+  check('S5b 前后缀差分能框出被替换的词', s5.mid === '铁镐', { mid: s5.mid });
+  check(
+    'S5c 规范化定位跨零宽字符仍能框准',
+    s5.slice === 'horizo' + ZW + ZW + 'ntal',
+    { slice: s5.slice }
+  );
+
+  // ---------------------------------------------------------------- S5d
+  // 三道闸门：只留中文、长度不超半数、必须有内容
+  const s5d = await sw.evaluate(() => {
     const d = globalThis.__traceDebug;
-    const raw = [
-      { word: 'horizontal', zh: 'horizontal', start: 19, end: 29 },
-      { word: 'video', zh: '视频', start: 30, end: 32 },
-      { word: 'ghost', zh: '', start: 40, end: 45 },
-    ];
-    const hasFn = typeof d.cjkSpansOnly === 'function';
-    return { hasFn, kept: hasFn ? d.cjkSpansOnly(raw) : null };
+    const plain = '今天我们来聊聊这个插件是怎么工作的，它靠旁路探针定位。';
+    return {
+      ok: d.acceptSpan(plain, '旁路探针'),
+      english: d.acceptSpan(plain, 'probe'),
+      tooLong: d.acceptSpan(plain, plain),
+      empty: d.acceptSpan(plain, '   '),
+    };
   });
   check(
-    'S5b 补译之后的把关只留中文高亮',
-    s5b.hasFn && s5b.kept.length === 1 && s5b.kept[0].word === 'video',
-    s5b
+    'S5d 三道闸门：中文短候选通过，英文/半句/空白被拒',
+    s5d.ok && !s5d.english && !s5d.tooLong && !s5d.empty,
+    s5d
+  );
+
+  // ---------------------------------------------------------------- S5e
+  // findWordHits 只定位、不改写原文（这是 bug 18 的根治点）
+  const s5e = await sw.evaluate(() => {
+    const d = globalThis.__traceDebug;
+    const text = 'Well, at least I guess this is a good time to make my iron pick.';
+    const hits = d.findWordHits(text, new Set(['pick']));
+    return { text, hits };
+  });
+  check(
+    'S5e findWordHits 找到词且不改动原文',
+    s5e.hits.length === 1 &&
+      s5e.hits[0].word === 'pick' &&
+      s5e.text.slice(s5e.hits[0].start, s5e.hits[0].end) === 'pick',
+    s5e
   );
 
   check('S6 无页面 JS 错误', errors.length === 0, { errors });

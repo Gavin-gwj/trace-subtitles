@@ -238,19 +238,33 @@ function hueOf(rgb) {
 
   // hover 之后 filter 应该变 none（用真实鼠标移动，让 :hover 生效）
   let hoverFilter = null;
-  const zbox = await page.evaluate(() => {
-    const o = document.getElementById('trace-sub-overlay');
-    const el = o?.querySelector('.trace-saved-zh');
-    if (!el) return null;
-    const r = el.getBoundingClientRect();
-    return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
-  });
+  // 必须按词取，不能取第一个 `.trace-saved-zh`。
+  // 这一句里有三个已收藏词，DOM 顺序是 lounge → beverage → vintage，
+  // 而 S10/S11 断言的是 `beverage` 的复习计数。早期版本用 querySelector
+  // 取第一个，实际悬停的是 lounge，于是「停留够久」那一轮增加的是 lounge
+  // 的计数，beverage 恒为 0，S11 永远失败（S10/S12 因为都期望「不变」
+  // 反而照样通过）—— 这类「断言对象与实际作用对象不是同一个」的错位，
+  // 只有把被测词写进选择器才不会再犯。
+  const zboxFor = (w) =>
+    page.evaluate((word) => {
+      const o = document.getElementById('trace-sub-overlay');
+      const el = [...(o?.querySelectorAll('.trace-saved-zh') || [])].find(
+        (n) => n.dataset.w === word
+      );
+      if (!el) return null;
+      const r = el.getBoundingClientRect();
+      return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+    }, w);
+  const zbox = await zboxFor('beverage');
   if (zbox) {
     await page.mouse.move(zbox.x, zbox.y);
     await page.waitForTimeout(500);
     hoverFilter = await page.evaluate(() => {
       const o = document.getElementById('trace-sub-overlay');
-      const el = o?.querySelector('.trace-saved-zh');
+      // 与 zboxFor 取同一个元素（beverage），否则悬停 A 却断言 B
+      const el = [...(o?.querySelectorAll('.trace-saved-zh') || [])].find(
+        (n) => n.dataset.w === 'beverage'
+      );
       return el ? getComputedStyle(el).filter : null;
     });
     await page.mouse.move(5, 5);
@@ -280,9 +294,28 @@ function hueOf(rgb) {
   check('S7 记忆中是红色系', hueOf(loungeW?.color) === 'red', { color: loungeW?.color });
   check('S8 已记住是绿色系', hueOf(vintW?.color) === 'green', { color: vintW?.color });
 
-  // 中文侧也要按状态着色（否则左右不一致）
-  const vintZh = (snap?.zhs || []).find((z) => z.w === 'vintage');
-  check('S9 译文侧已记住也是绿色系', hueOf(vintZh?.color) === 'green', { color: vintZh?.color });
+  // 中文侧也要按状态着色（否则左右不一致）。
+  //
+  // **不能要求「vintage 的中文必须高亮」**：这句的 vintage 在差分区里是
+  // 「这些老式的东西也在那里」11 个字，被 DIFF_MAX_ZH=7 挡下（宁可少亮不可亮错），
+  // 所以它在中文侧本来就没有 span。这与 test-dict 的 D14 是同一条教训 ——
+  // 拿「某个词必须有译文侧高亮」当断言，等于要求扩展去猜位置。
+  //
+  // 正确判据：**译文侧每个 span 的颜色都必须与它自己的状态一致**（左右不打架），
+  // 且「已记住 = 绿」这条留在 S15b（那时 lounge 已被标成 learned，必定有中文 span）。
+  const zhByState = (snap?.zhs || []).map((z) => ({
+    w: z.w,
+    st: z.st,
+    hue: hueOf(z.color),
+    color: z.color,
+  }));
+  const zhStatesOk =
+    zhByState.length > 0 &&
+    zhByState.every((z) =>
+      z.st === 'learned' ? z.hue === 'green' : z.hue === 'red'
+    );
+  console.log('zh by state:', JSON.stringify(zhByState));
+  check('S9 译文侧颜色与它自己的记忆状态一致', zhStatesOk, { zhByState });
 
   // ---- S10/S11：复习计数 ----
   const before = await sw.evaluate(async () => {
@@ -381,6 +414,14 @@ function hueOf(rgb) {
     return el ? { st: el.dataset.st || '', color: getComputedStyle(el).color } : null;
   });
   check('S15 标记后高亮立刻变绿', hueOf(loungeAfter?.color) === 'green', loungeAfter);
+
+  // S15b：译文侧也要同步变绿（S9 只能证明「左右不打架」，这里证明「跟着状态走」）
+  const loungeZh = await page.evaluate(() => {
+    const o = document.getElementById('trace-sub-overlay');
+    const el = [...(o?.querySelectorAll('.trace-saved-zh') || [])].find((e) => e.dataset.w === 'lounge');
+    return el ? { st: el.dataset.st || '', color: getComputedStyle(el).color } : null;
+  });
+  check('S15b 标记后译文侧高亮也变绿', hueOf(loungeZh?.color) === 'green', loungeZh);
 
   // ---- S16：关掉背单词模式后不再模糊 ----
   await sw.evaluate(async () => {

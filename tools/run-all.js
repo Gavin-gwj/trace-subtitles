@@ -25,6 +25,7 @@ const SUITES = [
   'test-split.js',
   'test-card.js',
   'test-review.js',
+  'test-align.js',
 ];
 
 const results = [];
