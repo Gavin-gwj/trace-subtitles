@@ -1,4 +1,4 @@
-/**
+﻿/**
  * 跑全部回归测试，逐条输出 RESULT 行。
  * 用法: node run-all.js
  */
@@ -23,6 +23,7 @@ const SUITES = [
   'test-invisible.js',
   'test-llm.js',
   'test-split.js',
+  'test-card.js',
 ];
 
 const results = [];

@@ -58,6 +58,7 @@ function check(name, ok, extra) {
       '--no-first-run',
       '--no-default-browser-check',
       '--mute-audio',
+      ...require('./lib/proxy').proxyArgs(),
     ],
     viewport: { width: 1280, height: 900 },
     locale: 'zh-CN',
@@ -249,7 +250,23 @@ function check(name, ok, extra) {
       await page.mouse.down();
       await page.mouse.move(yourBox.x + yourBox.w - 2, yourBox.y + yourBox.h / 2, { steps: 14 });
       await page.mouse.up();
-      await page.waitForTimeout(1800);
+      // 不能只等固定时长 —— 短语释义要走网络（Google 或大模型），
+      // 冷缓存时可能超过 1800ms，于是卡片弹出来了但 gloss 还是空的，
+      // L2d 就会随机失败（实测 3 次里失败 1 次，失败时 title 已经是
+      // "pay your" 但 gloss 为空，正是「弹了但没填完」）。
+      // 改成等卡片真的填充完成：loading 消失且短语释义出现。
+      await page
+        .waitForFunction(
+          () => {
+            const pop = document.querySelector('#trace-word-popup');
+            if (!pop || pop.classList.contains('trace-hidden')) return false;
+            if (pop.querySelector('.trace-pop-loading')) return false;
+            return !!pop.querySelector('.trace-pop-phrase-gloss');
+          },
+          { timeout: 20000 }
+        )
+        .catch(() => {});
+      await page.waitForTimeout(200);
 
       const dragSel = await page.evaluate(() => String(getSelection() || ''));
       check('L2c 拖选后浏览器选区是 pay your', /^pay\s+your$/i.test(dragSel.trim()), dragSel);

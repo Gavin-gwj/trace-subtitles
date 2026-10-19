@@ -20,6 +20,11 @@ const DEFAULT_SETTINGS = {
   engine: 'google',
   autoHideNative: true,
   clickWord: true,
+  // ---- 查词卡片 ----
+  // 详细程度：concise 只给 1-2 个义项（扫一眼就走）/ normal 默认 / full 全部义项+例句
+  dictDetail: 'normal',
+  // 卡片视觉样式：classic（旧版白卡，保留）/ paper（书页）/ ink（深色）/ aurora（渐变）
+  cardStyle: 'classic',
   // ---- 字幕样式（页内设置面板可实时调整）----
   origSize: 28, // 原文字号 px
   transSize: 21, // 译文字号 px
@@ -1239,60 +1244,184 @@ const POS_MAP = {
   determiner: '限定词', interjection: '感叹词', numeral: '数词',
   auxiliary: '助动词', article: '冠词', particle: '小品词',
   'proper noun': '专有名词', exclamation: '感叹词',
+  // Datamuse 的 tags 用单字母（n / v / adj / adv），已在上面覆盖；
+  // 这里补几个它会返回的少见标签
+  u: '不可数', prop: '专有名词',
 };
+
+/**
+ * 词性 → 配色键。CSS 里按 `data-pos` 上色，见 overlay.css 的 `.trace-pop-pos[data-pos=...]`。
+ *
+ * 为什么按词性上色而不是按顺序编号：查词的人关心的是「这是名词还是动词」，
+ * 颜色一致才能形成肌肉记忆 —— 看到绿色就知道是名词，看到蓝色就知道是动词，
+ * 不用再读那个小标签的字。词性本身是有限集，配色能覆盖全。
+ */
+const POS_KEY = {
+  名词: 'noun', 动词: 'verb', 形容词: 'adj', 副词: 'adv', 代词: 'pron',
+  介词: 'prep', 连词: 'conj', 限定词: 'det', 感叹词: 'interj',
+  数词: 'num', 助动词: 'aux', 冠词: 'art', 小品词: 'part',
+  专有名词: 'noun', 短语: 'phrase',
+};
+function posKeyOf(pos) {
+  return POS_KEY[pos] || 'other';
+}
+
+/**
+ * 详细程度 → 取多少义项、要不要例句/英文原文。
+ *
+ * 三个档位的差别不只是"多几条"，而是三种使用场景：
+ *   concise 扫一眼就走（刷剧时不想被卡片挡画面）
+ *   normal  默认，够判断这个词在这句里什么意思
+ *   full    精读/查生词，要看全所有义项和例句
+ */
+const DICT_DETAIL_PRESET = {
+  concise: { maxMeanings: 2, perPos: 1, wantExample: false, wantEnDefs: false },
+  normal: { maxMeanings: 6, perPos: 2, wantExample: true, wantEnDefs: true },
+  full: { maxMeanings: 12, perPos: 4, wantExample: true, wantEnDefs: true },
+};
+function detailPreset(name) {
+  return DICT_DETAIL_PRESET[name] || DICT_DETAIL_PRESET.normal;
+}
+
+/**
+ * 查词典，多源兜底。
+ *
+ * ## 为什么要兜底（真实 bug）
+ *
+ * 只用一个源 `api.dictionaryapi.dev` 时，某些词会**超时**而不是返回 404：
+ * 实测 `calling` 0.44s 正常、`beverage` 0.43s 正常，但 `vessel` 连续 18s
+ * 零字节。旧代码 3.5s 超时就静默降级，于是卡片上只剩 Google 给的一个词义，
+ * 没有音标、没有词性、没有例句 —— 用户看到的「信息太少」其实就是这个。
+ *
+ * ## 两级策略
+ *
+ * 1. **Datamuse 优先**（`api.datamuse.com/words?sp=<w>&md=dpr`）：它返回
+ *    `tags`（含词性）与 `defs`（`"n\tA craft for transportation..."` 这种
+ *    带词性前缀的释义），单次请求就有全部信息，实测 `vessel` 秒回，
+ *    而且释义里带 `(nautical)` / `(biology)` 这类**领域标注**，比
+ *    dictionaryapi.dev 更适合判断"这个词在这句话里是哪个意思"。
+ * 2. dictionaryapi.dev 作为补充：它带 `example` 例句，Datamuse 没有。
+ *
+ * 两个源都失败时返回空结构，让上层只用 Google 直译（至少卡片不空）。
+ */
+async function fetchDict(word, preset) {
+  const out = { phonetic: '', meanings: [], example: '', source: '' };
+
+  // ---- 源 1：Datamuse（快、稳、带领域标注）----
+  try {
+    const r = await fetchT(
+      'https://api.datamuse.com/words?sp=' +
+        encodeURIComponent(word) +
+        '&md=dpr&max=1',
+      {},
+      4000
+    );
+    if (r.ok) {
+      const arr = await r.json();
+      const e = Array.isArray(arr) ? arr[0] : null;
+      // 必须校验拼写完全相同：sp= 是模糊匹配，查 vessel 也可能返回 vessels
+      if (e && String(e.word || '').toLowerCase() === word.toLowerCase()) {
+        // tags 形如 ["n","v","pron:V EH1 S AH0 L "]；pron 里是音节化的发音提示
+        const tags = e.tags || [];
+        const pronTag = tags.find((t) => t.startsWith('pron:'));
+        if (pronTag) out.phonetic = pronTag.slice(5).trim();
+        // defs 形如 ["n\tA craft for transportation...", "v\t(transitive) To put..."]
+        for (const d of (e.defs || []).slice(0, preset.maxMeanings)) {
+          const tab = d.indexOf('\t');
+          const rawPos = tab >= 0 ? d.slice(0, tab) : '';
+          const def = (tab >= 0 ? d.slice(tab + 1) : d).trim();
+          if (!def) continue;
+          const pos = POS_MAP[rawPos] || POS_MAP[rawPos[0]] || '';
+          out.meanings.push({ pos, def, defZh: '', example: '', exampleZh: '' });
+        }
+        if (out.meanings.length) out.source = 'datamuse';
+      }
+    }
+  } catch (_) {
+    /* 源 1 失败继续试源 2 */
+  }
+
+  // ---- 源 2：dictionaryapi.dev（补音标与例句）----
+  // 已经拿到音标和足够义项时就不必再请求，省一次往返也省一次超时风险
+  const needMore = !out.phonetic || out.meanings.length < 2 || preset.wantExample;
+  if (needMore) {
+    try {
+      const r = await fetchT(
+        'https://api.dictionaryapi.dev/api/v2/entries/en/' + encodeURIComponent(word),
+        {},
+        3500
+      );
+      if (r.ok) {
+        const arr = await r.json();
+        const e = Array.isArray(arr) ? arr[0] : null;
+        if (e) {
+          if (!out.phonetic) {
+            out.phonetic =
+              e.phonetic || (e.phonetics || []).map((p) => p.text).find(Boolean) || '';
+          }
+          // Datamuse 已经有义项时，这里只补例句和缺的词性，
+          // 不重复堆一遍释义（否则卡片上同一条意思出现两次）
+          if (!out.meanings.length) {
+            (e.meanings || []).slice(0, 4).forEach((m) => {
+              (m.definitions || []).slice(0, preset.perPos).forEach((d) => {
+                if (out.meanings.length >= preset.maxMeanings) return;
+                out.meanings.push({
+                  pos: POS_MAP[m.partOfSpeech] || m.partOfSpeech || '',
+                  def: d.definition || '',
+                  defZh: '',
+                  example: d.example || '',
+                  exampleZh: '',
+                });
+              });
+            });
+          }
+          if (!out.example) {
+            out.example =
+              (e.meanings || [])
+                .flatMap((m) => m.definitions || [])
+                .map((d) => d.example)
+                .find(Boolean) || '';
+          }
+          if (!out.source) out.source = 'dictionaryapi';
+        }
+      }
+    } catch (_) {
+      /* 源 2 失败，用已有的 */
+    }
+  }
+
+  return out;
+}
 
 async function lookupWord(word) {
   const w = word.trim();
   if (!w) return null;
-  // dict2：旧缓存里的 meanings 只有英文 def、没有 defZh，也没有例句中文，
-  // 不换版本号的话用户刷新后看到的还是旧卡片。
-  const key = 'dict2|' + w.toLowerCase();
+  // dict3：换词典源（Datamuse 优先）+ 详细程度分档，旧缓存没有 posKey，
+  // 也不一定有多义项，必须换版本号让用户刷新后能看到新卡片。
+  const st = await getSettings();
+  const detail = st.dictDetail || 'normal';
+  const preset = detailPreset(detail);
+  const key = 'dict3|' + detail + '|' + w.toLowerCase();
   const cached = await idbGet('translations', key);
   if (cached && cached.dict) return cached.dict;
 
-  const dict = { word: w, phonetic: '', meanings: [], example: '', exampleZh: '', zh: '', senses: [] };
+  const dict = {
+    word: w,
+    phonetic: '',
+    meanings: [],
+    example: '',
+    exampleZh: '',
+    zh: '',
+    senses: [],
+    detail,
+    source: '',
+  };
 
-  // 词典与中文释义并行请求，谁慢谁降级，不互相拖累
-  const dictTask = (async () => {
-    // 免费词典：音标 + 英文释义 + 词性
-    // 注意 dictionaryapi.dev 对部分词（如 "So"）会永久挂起，必须超时并降级
-    try {
-      const r = await fetchT(
-        'https://api.dictionaryapi.dev/api/v2/entries/en/' + encodeURIComponent(w),
-        {},
-        3500
-      );
-      if (!r.ok) return;
-      const arr = await r.json();
-      const e = Array.isArray(arr) ? arr[0] : null;
-      if (!e) return;
-      dict.phonetic =
-        e.phonetic || (e.phonetics || []).map((p) => p.text).find(Boolean) || '';
-      // 每个词性最多取 2 条释义，整体最多 6 条 —— 再多会挤满卡片，
-      // 而且要逐条翻成中文，条数直接决定查词延迟。
-      (e.meanings || []).slice(0, 4).forEach((m) => {
-        (m.definitions || []).slice(0, 2).forEach((d) => {
-          if (dict.meanings.length >= 6) return;
-          dict.meanings.push({
-            pos: POS_MAP[m.partOfSpeech] || m.partOfSpeech || '',
-            def: d.definition || '',
-            defZh: '',
-            example: d.example || '',
-            exampleZh: '',
-          });
-        });
-      });
-      dict.example =
-        (e.meanings || [])
-          .flatMap((m) => m.definitions || [])
-          .map((d) => d.example)
-          .find(Boolean) || '';
-    } catch (_) {
-      /* 词典失败不影响整体 */
-    }
-  })();
-
-  await Promise.all([dictTask]);
+  const d = await fetchDict(w, preset);
+  dict.phonetic = d.phonetic;
+  dict.meanings = d.meanings;
+  dict.example = preset.wantExample ? d.example : '';
+  dict.source = d.source;
 
   // 一次批量请求翻完三件事：单词直译、每条英文释义、例句。
   // 早期单词直译是单独一次 googleTranslate，释义又批量一次 —— 两次往返，
@@ -1313,10 +1442,10 @@ async function lookupWord(word) {
     /* 翻译失败就只留英文释义，不影响卡片可用 */
   }
 
-  // 词义清单：同一词性下把中文释义收拢成一行，方便快速扫读
+  // 词义清单：给每个义项挂上配色键，前端按词性上色
   dict.senses = dict.meanings
     .filter((m) => m.defZh || m.def)
-    .map((m) => ({ pos: m.pos, text: m.defZh || m.def }));
+    .map((m) => ({ pos: m.pos, posKey: posKeyOf(m.pos), text: m.defZh || m.def }));
 
   await idbPut('translations', { key, dict, createdAt: Date.now() });
   return dict;
@@ -2103,6 +2232,9 @@ globalThis.__traceDebug = {
   wordForms,
   matchSaved,
   lookupWord,
+  fetchDict,
+  posKeyOf,
+  detailPreset,
   /** 短语查词（多词整体释义 + 逐词对照），大模型优先、Google 兜底 */
   lookupPhrase,
   normPhrase,

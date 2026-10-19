@@ -25,7 +25,7 @@ const DAY = 86400000;
     headless: false,
     executablePath: CHROME,
     ignoreDefaultArgs: ['--enable-automation'],
-    args: [`--disable-extensions-except=${EXT}`, `--load-extension=${EXT}`, '--no-first-run', '--mute-audio'],
+    args: [`--disable-extensions-except=${EXT}`, `--load-extension=${EXT}`, '--no-first-run', '--mute-audio', ...require('./lib/proxy').proxyArgs()],
     viewport: { width: 1440, height: 940 },
   });
 

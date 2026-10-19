@@ -90,6 +90,11 @@ async function loadSettings() {
   $('clickWord').checked = s.clickWord !== false;
   $('globalMode').checked = s.globalMode === true;
 
+  // 查词卡片：详细程度 + 样式预设
+  $('dictDetail').value = s.dictDetail || 'normal';
+  syncDictDetailHint();
+  setCardStyle(s.cardStyle || 'classic');
+
   // 大模型配置
   $('llmBaseUrl').value = s.llmBaseUrl || '';
   $('llmApiKey').value = s.llmApiKey || '';
@@ -106,6 +111,25 @@ async function loadSettings() {
 /** 只有选中「大模型」引擎时才展开配置区，避免平时占着一大块 */
 function syncLlmGroup() {
   $('llmGroup').style.display = $('engine').value === 'llm' ? '' : 'none';
+}
+
+/** 详细程度的三档说明文案，跟着下拉框走 */
+const DETAIL_HINT = {
+  concise: '简洁：只给 1-2 个常用义项，卡片最矮',
+  normal: '标准：义项 + 例句 + 英文原文',
+  full: '详细：所有义项 + 例句 + 英文原文',
+};
+function syncDictDetailHint() {
+  const v = $('dictDetail').value || 'normal';
+  $('dictDetailHint').textContent = DETAIL_HINT[v] || DETAIL_HINT.normal;
+}
+
+/** 高亮当前选中的卡片样式色块 */
+function setCardStyle(style) {
+  const name = style || 'classic';
+  document.querySelectorAll('#cardStylePicker .style-chip').forEach((b) => {
+    b.classList.toggle('on', b.dataset.style === name);
+  });
 }
 
 /** 从地址取 origin（scheme://host[:port]），取不到返回 '' */
@@ -200,6 +224,22 @@ function initSettingsUI() {
   });
   // 引擎切换时展开/收起配置区
   $('engine').addEventListener('change', syncLlmGroup);
+
+  // 查词卡片：详细程度
+  $('dictDetail').addEventListener('change', () => {
+    syncDictDetailHint();
+    // 换详细程度要让缓存失效 —— 后台的缓存键里带了档位，
+    // 所以这里只要落盘，下次点词自然按新档位取。
+    saveSettings({ dictDetail: $('dictDetail').value });
+  });
+  // 查词卡片：样式预设（点色块即时切换，无需保存按钮）
+  document.querySelectorAll('#cardStylePicker .style-chip').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const style = btn.dataset.style;
+      setCardStyle(style);
+      saveSettings({ cardStyle: style });
+    });
+  });
 
   // 拉取模型列表：地址/密钥填好后点一下，省得手打模型名
   $('llmFetch').addEventListener('click', async (ev) => {

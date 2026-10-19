@@ -36,7 +36,7 @@ const DODGE_CUES = [
     headless: false,
     executablePath: CHROME,
     ignoreDefaultArgs: ['--enable-automation'],
-    args: [`--disable-extensions-except=${EXT}`, `--load-extension=${EXT}`, '--no-first-run', '--mute-audio'],
+    args: [`--disable-extensions-except=${EXT}`, `--load-extension=${EXT}`, '--no-first-run', '--mute-audio', ...require('./lib/proxy').proxyArgs()],
     viewport: VIEW,
   });
 

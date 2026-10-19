@@ -44,6 +44,7 @@ const ZW = '\u200B'; // 零宽空格
       '--no-first-run',
       '--no-default-browser-check',
       '--mute-audio',
+      ...require('./lib/proxy').proxyArgs(),
     ],
     viewport: { width: 1280, height: 860 },
     locale: 'zh-CN',

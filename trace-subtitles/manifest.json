@@ -14,7 +14,8 @@
     "https://*.youtube.com/*",
     "https://translate.googleapis.com/*",
     "https://api.mymemory.translated.net/*",
-    "https://api.dictionaryapi.dev/*"
+    "https://api.dictionaryapi.dev/*",
+    "https://api.datamuse.com/*"
   ],
   "optional_host_permissions": ["https://*/*", "http://*/*"],
   "background": {

@@ -17,6 +17,7 @@
 |---|---|
 | **双语字幕** | 原文 + 中文上下两行，跟着视频自动推进；长句在逗号、句号处自动断开，不会糊成一大坨 |
 | **点词查义** | 点字幕里任何英文单词，弹出音标、中文释义、这个词在本句里的意思；英文原文折叠收起，不挡视线 |
+| **卡片可调** | 详细程度三档（简洁 / 标准 / 详细），四套配色样式（白卡 / 纸质 / 墨黑 / 极光），14 种词性各有专属颜色 |
 | **划短语** | 鼠标拖选连续几个词（如 `dive in`），松手就查整段短语的意思，而不是逐词硬拼 |
 | **生词本** | 一键收藏单词或短语；**跨视频高亮**——今天存的词，明天看别的视频照样亮起来 |
 | **单复数同源** | 收藏了 `beverage`，字幕里出现 `beverages` 也会高亮，点进去是同一个词条 |
@@ -394,7 +395,7 @@ store），同一个视频二次打开不再请求网络。
 - **退化路径**：若引擎把哨兵全吃掉（例如 MyMemory），`usable` 判定失败 → 退回纯译文，
   中文不高亮但至少能读，不会显示乱码。
 
-### 过程中修掉的二十一个真实 bug（值得记录）
+### 过程中修掉的二十三个真实 bug（值得记录）
 
 **bug 1：跨消息传函数。** `content.js` 曾把 `hash: S.hash` 放进 `chrome.runtime.sendMessage`，
 而消息经过结构化克隆会丢掉函数，SW 侧抛 `TypeError: hashFn is not a function`。
@@ -1273,6 +1274,33 @@ more words,` —— 一句 100 多字符，撑成两行压掉半个画面。
 `waitForFunction` 等到 `.trace-sub-orig` 真有文本、攒够 4 句就收工（原来固定跑满
 40 拍，19.2s 的夹具视频播完后也在采）。修完连跑 6 次全 PASS。
 
+**bug 20：新词典源在 service worker 里 `Failed to fetch`。**
+加了 `api.datamuse.com` 做词典兜底后，卡片音标一栏永远是空的，控制台只有
+`Failed to fetch`。原因和 bug 17 一模一样但更隐蔽：**`manifest.json` 的
+`host_permissions` 里没有 `https://api.datamuse.com/*`** —— 扩展的 service worker
+fetch 一个未授权的域名，Chrome 不给任何状态码，直接抛 `Failed to fetch`。
+补上权限即恢复。
+
+这条的教训是：**在扩展里加新 API，必须同时改 manifest**。`fetch` 的报错不会
+告诉你是权限问题，只会说 `Failed to fetch`，看起来像网络故障。
+
+**bug 21：自动化启动的 Chrome 不读 Windows 系统代理。**
+同一台机器上：
+
+```bash
+curl -x http://127.0.0.1:7897 https://translate.googleapis.com/...   # 200，0.69s
+curl    https://translate.googleapis.com/...                          # 000，超时
+```
+
+而 Playwright 起的 Chrome 里 `fetch('https://translate.googleapis.com/...')`
+**639ms 就 `Failed to fetch`**（不是超时，是直接失败）。系统代理设置
+（`HKCU\...\Internet Settings` 的 `ProxyEnable=1` / `ProxyServer=127.0.0.1:7897`）
+是配好的，但自动化启动的 Chrome 不读它。加 `--proxy-server` 后立刻 200。
+
+于是新增 `tools/lib/proxy.js`：**从注册表读**系统代理，有就用、没有就返回空数组
+（直连），也可用 `TRACE_TEST_PROXY` 覆盖。不把地址写死在 18 个测试文件里 ——
+那样在没配代理的机器上整套回归会全部失败，而失败原因看起来像代码坏了。
+
 ### 词形归一化：收藏 beverage，也要高亮 beverages
 
 生词本里存的是**某个词形**，但视频里出现的可能是另一个。收藏 `beverage` 之后，
@@ -1851,6 +1879,162 @@ D8 的 `cjkRatio:0.65` 与 `cjkRatioAll:0.34` 之差就是折叠英文释义的�
 
 ---
 
+### 查词卡片：详细程度三档 + 四套样式 + 词性配色
+
+用户后来又提了一轮（附两张截图对比）：一张 `calling` 内容齐全，另一张 `vessel`
+只有「单词 + 血管 + 按钮」，问「是不是信息展示的有些少了」，并要求
+「每个词性用不一样的颜色」「增加几个预设的样式，这个版本的可以保留」。
+
+#### 根因：`vessel` 不是没数据，是词典源永久超时
+
+先用 curl 直连量了一遍：
+
+| 词 | `dictionaryapi.dev` 响应 |
+|---|---|
+| calling | 200，0.44s |
+| beverage | 200，0.43s |
+| **vessel** | **超时 18s，0 字节**（不是 404，也不是 429） |
+
+旧代码 `fetchT(..., 3500)` 3.5s 超时后**静默降级**，卡片只剩一个 Google 单译
+「血管」—— 而这句话里 `this vessel` 是「这艘船」，连语境义都错了。
+
+所以问题不在 UI，在**单一词典源**。换成双源：
+
+1. **Datamuse**（`api.datamuse.com/words?sp=…&md=dpr&max=1`）：秒回，带词性前缀、
+   领域标注（`(nautical)`、`(biology)`）、音节化发音。这是主力源。
+2. **dictionaryapi.dev**：只在 Datamuse 拿到的信息不足时才请求
+   （`!out.phonetic || out.meanings.length < 2 || preset.wantExample`），
+   避免重复堆义项。
+
+`vessel` 现在能拿到 8 条义项（船 / 容器 / 血管 / 人 / 动词「装船」…），
+`test-card.js` 的 C5 断言 ≥2 条。
+
+**Datamuse 有个必须处理的细节**：`sp=` 是**模糊匹配**，查 `vessel` 可能返回
+`vessels`。必须校验拼写完全相同，否则音标和义项都会串到别的词上：
+
+```js
+if (e && String(e.word || '').toLowerCase() === word.toLowerCase()) { … }
+```
+
+#### 详细程度：三档，条数真的递增
+
+`DEFAULT_SETTINGS.dictDetail` 默认 `'normal'`，三档预设：
+
+```js
+const DICT_DETAIL_PRESET = {
+  concise: { maxMeanings: 2,  perPos: 1, wantExample: false, wantEnDefs: false },
+  normal:  { maxMeanings: 6,  perPos: 2, wantExample: true,  wantEnDefs: true },
+  full:    { maxMeanings: 12, perPos: 4, wantExample: true,  wantEnDefs: true },
+};
+```
+
+实测 `vessel`：concise 2 条 / normal 6 条 / full 8 条（Datamuse 就给了 8 条，
+full 已取尽）。简洁档**不显示英文原文**（`wantEnDefs: false`）——
+选了「简洁」还拖着一大块折叠的英文，就名不副实。
+
+缓存键必须带档位，否则换档读回旧结果：
+`'dict3|' + detail + '|' + w.toLowerCase()`。
+
+#### 四套样式：只换 CSS 变量，不复制布局
+
+`pop.dataset.style = settings.cardStyle`，CSS 侧四组变量：
+
+| 样式 | 底色 | 强调色 | 圆角 | 特征 |
+|---|---|---|---|---|
+| `classic` | `#fff` | `#065fd4` | 12px | 原版，蓝色通栏按钮 |
+| `paper` | `#fbf7ef` 米白 | `#8a5a2b` 棕 | 6px | **Georgia 衬线**，像翻纸质词典 |
+| `ink` | `#12121a` 深墨 | `#ffd76e` 暖金 | 14px | 与设置面板/词库看板同配色 |
+| `aurora` | 紫黑渐变 | `#7c5cff` | 16px | 三层阴影含 `0 0 34px` 光晕 |
+
+关键设计：**换主题只改变量，布局规则一份**。加第 5 套主题的成本是十几行变量，
+不是复制整段 CSS。
+
+#### 词性配色：14 种，跨主题只调亮度不调色相
+
+`data-pos` 取 14 个键（`noun`/`verb`/`adj`/`adv`/`pron`/`prep`/`conj`/`interj`/
+`num`/`aux`/`art`/`part`/`phrase`/`other`），每套主题各配一组 `-fg`/`-bg`。
+classic 下名词蓝 `#1d4ed8`、动词绿 `#15803d`、形容词橙 `#b45309`、副词紫 `#7e22ce`。
+
+**跨主题只调亮度不调色相** —— 保住「绿=动词」的肌肉记忆，深色主题下用户不用
+重新学一遍配色。`ink` 下同一个动词变成 `#7fe0b8`（更亮）+ `rgba(52,211,153,.16)`。
+
+#### 两条假通过的教训（写测试时踩的）
+
+**第一版 C15（paper 用衬线字体）永远为真。** 正则写的是 `/Georgia|serif|…/`，
+而 `sans-serif` 也含 `serif`，classic 的字体 `Roboto, …, sans-serif` 直接被匹配。
+而且测量点在循环**外面**，量到的是最后一档 `aurora` 的字体却拿去断言 `paper`。
+修法：在每档样式生效时分别量，并断言 paper 命中衬线**且** classic 不命中。
+
+**第一版 C7（词性颜色不同）也永远为真。** 它用 `vessel` 的义项去比颜色，
+而 `vessel` 的义项恰好**全是名词** —— `distinctColors.size === 1` 天然成立。
+修法：临时把 14 种词性标签全插进卡片量计算样式，断言前景 14 种、背景 14 种互不相同。
+
+#### 回归实测（`node test-card.js`，19 项）
+
+```
+✓ C3 有音标（vessel 的词典源超时，靠 Datamuse 兜底） {"phon":"V EH1 S AH0 L"}
+✓ C5 义项 ≥ 2 条（不再是图二那样只剩一条） {"senseCount":6}
+✓ C7 14 种词性各有不同颜色 {"distinctFg":14,"distinctBg":14}
+✓ C8 详细程度递增 {"concise":2,"normal":6,"full":8}
+✓ C10 简洁档不显示英文原文释义 {"conciseHasMore":false,"fullHasMore":true}
+✓ C12 四套样式的实际外观互不相同 {"distinct":4}
+✓ C13 ink / aurora 是深色底 {"inkBg":"rgb(18,18,26)","auroraImage":"linear-gradient(158deg,…"}
+✓ C15 paper 的单词用衬线字体（且与 classic 不同）
+     {"paperFont":"Georgia, \"Songti SC\", SimSun, serif","classicFont":"Roboto, … sans-serif"}
+✓ C16 深色主题下 14 种词性颜色仍互不相同 {"distinctFg":14}
+✓ C17 本句译文英文行在四套主题下对比度 ≥ 4.5:1
+     {"classic":"5.41:1","paper":"5.2:1","ink":"6.96:1","aurora":"7.11:1"}
+✓ C18 本句译文英文行字号 ≥ 13px
+```
+
+反向验证三轮：把 `detail` 硬写成 `'full'`（忽略设置）→ C9/C10 FAIL；
+把 `dataset.style` 硬写成 `'classic'` → C11/C12/C13/C15 一起 FAIL；
+把四套 `--pop-faint` 退回原始值 → C17 FAIL（`2.85 / 2.66 / 3.56 / 3.90:1`）。
+
+#### 截图评审抓到的对比度问题（C17/C18 的由来）
+
+四套样式做完后截图逐张看，评审反复说「本句译文的英文行看不清」。
+一开始我以为是主观判断 —— 肉眼觉得「灰是灰了点，但能读」。改成**量化**后才发现
+不是观感问题，是硬指标不达标：
+
+| 主题 | 英文行原色 | 对比度 | WCAG AA（4.5:1） |
+|---|---|---|---|
+| classic | `#999` on `#fff` | **2.85:1** | ✗ |
+| paper | `#a2988a` on `#fbf7ef` | **2.66:1** | ✗ |
+| ink | `#6b6b7a` on `#12121a` | **3.56:1** | ✗ |
+| aurora | `#7a719e` on `#1b1436` | **3.90:1** | ✗ |
+
+**四套全不达标**，而且深色主题反而更糟（深底上灰字看起来更淡）。
+修法是按目标对比度反解颜色，而不是凭感觉挑一个更深的灰 ——
+保持色相不变，只压亮度，`faint` 提到 5.0~5.6:1。
+
+但颜色修完还不够。**层级也错了**：英文行原本用 `--pop-faint`，
+而 `faint` 的语义应该留给「非必要」文字（加载提示、滚动条），
+可读的次要正文该用 `--pop-dim`。换过去后从 5.0 提到 5.2~7.1:1，字号也从 12px 提到 13px。
+
+> 顺带一个反例：视觉评审最后建议「英文应该比中文更突出，主次反了」——
+> 这个没采纳。用户的原话是「我本来就是要看翻译」，中文必须更重。
+> 评审看的是排版均衡，用户要的是查词效率，这两个目标冲突时按用户说的办。
+
+另外 aurora 的按钮底色 `#7c5cff` 配白字只有 **4.35:1**（差一点点），
+压暗到 `#7350f2` 后 5.05:1。paper 的卡片描边也从 `#e0d5c2` 加重到 `#d3c4ab` ——
+米白卡最容易和浅色视频画面糊在一起，描边得比别的主题重一档。
+
+#### 顺带修掉的两个真 bug
+
+**1. `manifest.json` 少了 `api.datamuse.com`。** 新词典源在 service worker 里
+fetch，没写进 `host_permissions` 就被拦，只报 `Failed to fetch` ——
+和 bug 17 的表现一模一样，极难定位。已补。
+
+**2. 自动化启动的 Chrome 不读 Windows 系统代理。** 同一台机器上 curl 走
+`127.0.0.1:7897` 能拿到 Google 翻译，而 Playwright 起的 Chrome 里
+`fetch('https://translate.googleapis.com/…')` 639ms 就 `Failed to fetch`（不是超时）。
+加上 `--proxy-server` 后立刻 200。于是新增 `tools/lib/proxy.js`：**从注册表读**
+系统代理设置，有就用、没有就直连，避免把地址写死导致别的机器上全套回归失败
+（也可用 `TRACE_TEST_PROXY=…` 覆盖）。
+
+---
+
 ### 短语划词：选中 `pay your fair`，别给我「支付你的公平的」
 
 **需求**：选中多个词（短语/习语）时给整段释义，并且能作为「短语」条目进生词本；
@@ -2079,8 +2263,13 @@ node test-phrase.js          # 短语整段释义 + 短语生词本 + 大模型�
 node test-invisible.js       # 译文里不残留英文（Google 会插零宽空格破坏匹配）
 node test-llm.js             # 大模型配置：手势里申请权限 + 拉模型 + 测试连接 + 后台可用
 node test-split.js           # 句中句号断开 + 单句不拆 + 时间轴分摊 + 跨 cue 合并不回归
+node test-card.js            # 查词卡片：详细程度三档 + 四套样式 + 词性配色 + 词典多源兜底
 node run-all.js              # 一次跑完以上全部，末尾输出 PASS/FAIL 汇总
 ```
+
+`tools/lib/proxy.js` 从 Windows 注册表读系统代理并传给测试用的 Chrome ——
+**自动化启动的 Chrome 不读系统代理设置**，直连 `translate.googleapis.com`
+会立刻 `Failed to fetch`（详见查词卡片那节）。没配代理的机器上它会自动直连。
 
 `tools/mock/` 用 Playwright `page.route()` 整体伪造 `https://www.youtube.com/**`，
 提供假的 `player.getPlayerResponse()`、`/api/timedtext` 的 json3 正文，以及 13 条故意碎片化
@@ -2218,8 +2407,10 @@ D:\MyFiles\项目\Trace\
    ├─ test-invisible.js         译文里不残留英文（零宽空格破坏匹配）
    ├─ test-llm.js               大模型配置：手势里申请权限 + 拉模型 + 测试连接 + 后台可用
    ├─ test-split.js             句中句号断开 + 单句不拆 + 时间轴分摊 + 跨 cue 合并不回归
+   ├─ test-card.js              查词卡片：详细程度三档 + 四套样式 + 词性配色 + 词典多源兜底
    ├─ test-settings.js          MyMemory 降级 / 引擎切换缓存 / 自动出字幕回归
    ├─ lib\perm-ext.js           测试助手：预置 host_permissions，绕开点不到的原生权限弹框
+   ├─ lib\proxy.js              测试助手：从注册表读系统代理，Chrome 自动化启动不读它
    ├─ run-all.js                一次跑完全部回归，输出汇总表
    ├─ gen-icons.js              纯 Node 生成 PNG 图标
    ├─ probe-ext2\               主世界 vs 隔离世界对照实验
@@ -2234,6 +2425,7 @@ D:\MyFiles\项目\Trace\
 | `shot-mock.png` | 双语字幕 + 生词高亮 + 查词卡 |
 | `shot-pot.png` | pot 模式下靠网络钩子拿到字幕 |
 | `shot-dict.png` | 查词卡：「本句译作」与「单词直译」并列 |
+| `shot-card-classic.png` / `-paper` / `-ink` / `-aurora.png` | 查词卡四套样式对比（同一单词 `vessel`） |
 | `shot-phrase.png` | 短语卡：警示条 + 降级释义 + 逐词对照 |
 | `shot-phrase-board.png` | 词库看板的短语视图与短语抽屉 |
 | `shot-center.png` | 拖动后横向仍居中 |

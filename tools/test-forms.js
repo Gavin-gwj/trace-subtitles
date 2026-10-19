@@ -66,6 +66,7 @@ function wordFormsBlock(file) {
       '--no-first-run',
       '--no-default-browser-check',
       '--mute-audio',
+      ...require('./lib/proxy').proxyArgs(),
     ],
     viewport: { width: 1280, height: 900 },
     locale: 'zh-CN',

@@ -24,7 +24,7 @@ const FRAME = { left: 140, top: 80, width: 900, height: 506 };
     headless: false,
     executablePath: CHROME,
     ignoreDefaultArgs: ['--enable-automation'],
-    args: [`--disable-extensions-except=${EXT}`, `--load-extension=${EXT}`, '--no-first-run', '--mute-audio'],
+    args: [`--disable-extensions-except=${EXT}`, `--load-extension=${EXT}`, '--no-first-run', '--mute-audio', ...require('./lib/proxy').proxyArgs()],
     viewport: VIEW,
   });
 

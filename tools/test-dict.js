@@ -49,6 +49,7 @@ function check(name, ok, extra) {
       '--no-first-run',
       '--no-default-browser-check',
       '--mute-audio',
+      ...require('./lib/proxy').proxyArgs(),
     ],
     viewport: { width: VW, height: VH },
     locale: 'zh-CN',

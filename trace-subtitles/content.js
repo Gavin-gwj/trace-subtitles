@@ -1691,11 +1691,15 @@
 
     pop.innerHTML = `
       <div class="trace-pop-head">
-        <span class="trace-pop-word">${escapeHtml(word)}</span>
+        <span class="trace-pop-title">
+          <span class="trace-pop-word">${escapeHtml(word)}</span>
+        </span>
         <button class="trace-pop-close" data-act="close" title="关闭">×</button>
       </div>
       <div class="trace-pop-body"><div class="trace-pop-loading">查询中…</div></div>`;
     pop.classList.remove('trace-hidden');
+    // 卡片主题：四套预设，只换 data-style，CSS 变量跟着变
+    pop.dataset.style = state.settings?.cardStyle || 'classic';
     positionPopup(pop, rect);
 
     // 查词与"是否已在生词本"并行，后者很快，先更新一次状态
@@ -1725,24 +1729,49 @@
     state.wordPopup = { ...state.wordPopup, ...dict, saved };
     // 卡片以中文为主：最上面是这个词在当前语境下的中文，往下是中文释义，
     // 英文原文折到「英文释义」里默认收起 —— 用户要看的是翻译，不是英文解释。
+    //
+    // 详细程度（concise / normal / full）由后台按设置决定取了几条义项，
+    // 这里只负责把它们渲染出来，并给每条挂上词性配色键。
+    const posKey = (pos) => {
+      const map = {
+        名词: 'noun', 动词: 'verb', 形容词: 'adj', 副词: 'adv', 代词: 'pron',
+        介词: 'prep', 连词: 'conj', 限定词: 'det', 感叹词: 'interj',
+        数词: 'num', 助动词: 'aux', 冠词: 'art', 小品词: 'part',
+        专有名词: 'noun', 短语: 'phrase',
+      };
+      return map[pos] || 'other';
+    };
     const senses = (dict.meanings || [])
       .filter((m) => m.defZh || m.def)
-      .slice(0, 4)
       .map(
         (m) =>
           `<li>${
-            m.pos ? `<i>${escapeHtml(m.pos)}</i>` : ''
-          }<span>${escapeHtml(m.defZh || m.def)}</span></li>`
+            m.pos
+              ? `<i class="trace-pop-pos" data-pos="${posKey(m.pos)}">${escapeHtml(
+                  m.pos
+                )}</i>`
+              : ''
+          }<span class="trace-pop-txt">${escapeHtml(m.defZh || m.def)}</span></li>`
       )
       .join('');
-    const enDefs = (dict.meanings || [])
-      .filter((m) => m.def)
-      .slice(0, 3)
-      .map(
-        (m) =>
-          `<li>${m.pos ? `<i>${escapeHtml(m.pos)}</i>` : ''}${escapeHtml(m.def)}</li>`
-      )
-      .join('');
+    // 英文原文释义：只在详细程度允许时提供（简洁档直接不给，
+    // 否则「简洁」还是拖着一大块英文，和用户选它的目的相反）
+    const wantEnDefs = (dict.detail || 'normal') !== 'concise';
+    const enDefs = wantEnDefs
+      ? (dict.meanings || [])
+          .filter((m) => m.def)
+          .map(
+            (m) =>
+              `<li>${
+                m.pos
+                  ? `<i class="trace-pop-pos" data-pos="${posKey(m.pos)}">${escapeHtml(
+                      m.pos
+                    )}</i>`
+                  : ''
+              }${escapeHtml(m.def)}</li>`
+          )
+          .join('')
+      : '';
     // 视频里的原句 + 其中文译文：这是「这个词在这里到底什么意思」最直接的答案
     const ctxEn = state.wordPopup?.context || '';
     const ctxZh = state.wordPopup?.contextZh || '';
@@ -1755,8 +1784,20 @@
     const exEn = dict.example || '';
     const exZh = dict.exampleZh || '';
 
+    // 音标塞进标题行（紧挨单词右侧），而不是单独占一行 ——
+    // 卡片本来就窄，音标单独一行会白占 20px 高度，而它只是个辅助信息。
+    const titleEl = pop.querySelector('.trace-pop-title');
+    if (titleEl) {
+      titleEl.innerHTML = `<span class="trace-pop-word">${escapeHtml(
+        dict.word || word
+      )}</span>${
+        dict.phonetic
+          ? `<span class="trace-pop-phon">${escapeHtml(dict.phonetic)}</span>`
+          : ''
+      }`;
+    }
+
     pop.querySelector('.trace-pop-body').innerHTML = `
-      ${dict.phonetic ? `<div class="trace-pop-phon">${escapeHtml(dict.phonetic)}</div>` : ''}
       ${
         // 这句里它译成了什么 —— 比词典义更贴合当前语境，放最前面，
         // 让用户先看到「复古」再看词典的「优质的」，就不会觉得两边打架。
