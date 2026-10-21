@@ -893,10 +893,105 @@
         realignActive();
       }
     }
+    // 后台预热这一句里的候选词，用户点下去时大概率已经命中缓存。
+    prefetchWords(sentence.text);
     // 句子变长/变短后框高可能变化，自由模式下重新夹一次纵向位置，避免下半截出画面
     if (state.settings?.freePos) reapplyFreePos();
     fitToFrame();
   }
+
+  /**
+   * 预取当前句里「可能被点」的词，让点击查词命中 IndexedDB 缓存。
+   *
+   * ## 为什么需要（体验问题）
+   *
+   * 查一个从未查过的词要跑完整链路（两个词典源 + Google 批量翻译），
+   * 实测 0.5~1.5s；命中缓存则是毫秒级。用户感觉到的「有些词点下去很慢、
+   * 有些秒开」，本质就是这个差别 —— 慢的那些只是**没缓存过**。
+   *
+   * 但用户会点哪个词完全可预测：只可能是当前这句里的词。所以句子一上屏
+   * 就后台问一遍，等鼠标真点下去时缓存已经就位。
+   *
+   * ## 为什么要限流
+   *
+   * 一句可能有几十个词，全丢过去会瞬间打爆两个公开词典 API（Datamuse /
+   * dictionaryapi 都没有配额保证），反而让真正被点的那个词排在队尾。
+   * 所以：
+   *   · 只取「较长且非纯虚词」的词，常见功能词不预取
+   *   · 每句最多 PRE_WORDS 个，全局同时最多 PRE_CONCURRENCY 个在飞
+   *   · 已预取过的词记在 preWarm，不重复请求
+   *   · 用户点了词就优先——真正的 dict 请求永远排在预取前面，
+   *     因为预取完全可丢弃，而点击必须有反馈。
+   */
+  const PRE_WORDS = 4;
+  const PRE_CONCURRENCY = 2;
+  const preWarm = new Set(); // 已经预取成功（或正在预取）的词
+  let preInflight = 0;
+  const preQueue = [];
+  // 预取是"猜"，同一句会反复渲染（换句、拖进度条、改设置都会重绘），
+  // 所以失败必须能重来，否则一次网络抖动会让这个词在整个会话里
+  // 永远不再预取 —— 那就退回到了"点下去才查"的老问题。
+  const preFailed = new Set();
+
+  /** 不值得预取的功能词：抄一份最小表，避免把整包 stopwords 拉进内容脚本 */
+  const PRE_SKIP = new Set(
+    (
+      'the a an and or but if of to in on at for with from by as is are was were be been ' +
+      'being am do does did have has had i you he she it we they me him her us them my your ' +
+      'his its our their this that these those there here what who whom which when where why ' +
+      'how not no yes so just very too also then than now up down out off over again all any ' +
+      'some can could will would shall should may might must about into through during before ' +
+      'after above below between both each few more most other such only own same s t don'
+    ).split(' ')
+  );
+
+  function prefetchWords(text) {
+    if (!state.settings?.enabled) return;
+    if (!state.settings?.clickWord) return;
+    const raw = String(text || '');
+    if (!raw) return;
+    // 与 renderWords 同一套切词口径，保证预取的就是能点的那批词
+    const cands = (raw.match(/[A-Za-z][A-Za-z'’-]*/g) || [])
+      .map((x) => x.replace(/^[-']+|[-']+$/g, ''))
+      .filter((x) => x && x.length >= 4 && !PRE_SKIP.has(x.toLowerCase()))
+      // 长词更可能是生词，也更容易是用户真正想查的那个
+      .sort((a, b) => b.length - a.length)
+      .slice(0, PRE_WORDS);
+    for (const w of cands) {
+      const key = w.toLowerCase();
+      if (preWarm.has(key) || preFailed.has(key)) continue;
+      preWarm.add(key);
+      preQueue.push(key);
+    }
+    drainPreQueue();
+  }
+
+  function drainPreQueue() {
+    while (preInflight < PRE_CONCURRENCY && preQueue.length) {
+      const word = preQueue.shift();
+      preInflight++;
+      // 预取失败要放回可重试状态：后台对有英文没中文的残缺结果也只缓存 5 分钟，
+      // 下一次渲染这句时会重新预取。成功则永远不再预取（已进 IndexedDB）。
+      chrome.runtime
+        .sendMessage({ type: 'dict', word, prefetch: true })
+        .then((r) => {
+          // 后台返回 null 或 ok:false 都算没拿到，允许以后重试
+          if (!r || r.ok === false || !r.data) {
+            preWarm.delete(word);
+            preFailed.add(word);
+          }
+        })
+        .catch(() => {
+          // 扩展刚重载 / 消息端口关闭：这次不算数，允许重试
+          preWarm.delete(word);
+        })
+        .finally(() => {
+          preInflight--;
+          drainPreQueue();
+        });
+    }
+  }
+
 
   /**
    * 字幕框太高时按比例缩小字号，让它留在视频画面里。
@@ -1480,6 +1575,14 @@
       if (!btn) return;
       const act = btn.dataset.act;
       if (act === 'close') hidePopup();
+      if (act === 'retry') {
+        // 卡片上的「重新查询」：force 跳过缓存直连网络。
+        // 用存下来的 rect 原地重绘，卡片不会跳位置。
+        const d = state.wordPopup;
+        if (!d) return;
+        const r = d.retryRect || popupEl.getBoundingClientRect();
+        openWordCard(d.retryWord || d.word, r, true);
+      }
       if (act === 'add') {
         const d = state.wordPopup;
         if (!d) return;
@@ -1736,14 +1839,25 @@
     const word = el.dataset.w;
     if (!word) return;
 
-    const rect = el.getBoundingClientRect();
+    return openWordCard(word, el.getBoundingClientRect());
+  }
+
+  /**
+   * 打开单词卡。
+   *
+   * 抽成独立函数是为了让卡片上的「重新查询」能原样再跑一遍 ——
+   * 词典源偶发全挂时（后台会把空结果缓存 5 分钟），用户不该只能干等缓存过期。
+   * force=true 时后台跳过缓存直连网络。
+   */
+  async function openWordCard(word, rect, force) {
     const pop = ensurePopup();
     // data-w 在渲染时已归一化成生词本里的那个词（点 beverages 拿到 beverage），
     // 但历史渲染结果或手动构造的节点可能还是原始词形，这里再归一化一次兜底。
     const canon = findSaved(word) || word;
     // 点开已收藏词的卡片 = 用户查看了一次答案，算一次复习
     // （用户原话：「你点击了它或者鼠标移动到下面的译文上，那么会被算作重新记忆」）。
-    if (findSaved(word)) recordReview(canon);
+    // force=true 是同一张卡上的「重新查询」，不是新的一次复习，不重复记账。
+    if (!force && findSaved(word)) recordReview(canon);
     // 生词在译文里被高亮时，后台同时给了它在那句话里的译法（zhSpans）。
     // 这是「这个词在这句里到底译成什么」最权威的答案 —— 词典给的是通用义，
     // 常常和语境义不一致（vintage 词典「优质的」/ 本句「复古」），用户会以为翻错了。
@@ -1757,6 +1871,9 @@
       context: state.active?.text || '',
       contextZh: state.active?.zh || '',
       contextWordZh: spanZh,
+      // 「重新查询」原地重绘要用的锚点：词 + 原始 rect。
+      retryWord: canon,
+      retryRect: rect,
     };
 
     pop.innerHTML = `
@@ -1780,7 +1897,11 @@
 
     let dict = null;
     try {
-      const r = await chrome.runtime.sendMessage({ type: 'dict', word: canon });
+      const r = await chrome.runtime.sendMessage({
+        type: 'dict',
+        word: canon,
+        force: !!force,
+      });
       if (r && r.ok) dict = r.data;
     } catch (_) {}
 
@@ -1792,7 +1913,11 @@
 
     if (!dict) {
       pop.querySelector('.trace-pop-body').innerHTML =
-        '<div class="trace-pop-loading">查询失败</div>';
+        '<div class="trace-pop-miss"><div class="trace-pop-miss-title">查询失败</div>' +
+        '<div class="trace-pop-miss-sub">后台没有返回结果，可能是扩展刚被重载。</div>' +
+        '<button class="trace-pop-retry" data-act="retry">↻ 重新查询</button></div>';
+      state.wordPopup = { ...state.wordPopup, retryWord: canon, retryRect: rect };
+      positionPopup(pop, rect);
       return;
     }
 
@@ -1867,7 +1992,22 @@
       }`;
     }
 
+    // 「什么都没查到」：词典源全挂 / 被墙 / 该词不在词典里。
+    // 旧版这里什么都不渲染，卡片中间留白，用户只看到标题 + 本句译文 + 按钮，
+    // 完全不知道发生了什么（m01142 就是这么报上来的）。现在给一句话 + 一个
+    // 重新查询的入口，用户不必等后台 5 分钟的缓存过期。
+    const dictEmpty = !senses && !dict.zh && !(dict.meanings || []).length;
+
     pop.querySelector('.trace-pop-body').innerHTML = `
+      ${
+        dictEmpty
+          ? `<div class="trace-pop-miss">
+              <div class="trace-pop-miss-title">没查到这个词的释义</div>
+              <div class="trace-pop-miss-sub">可能是词典源暂时连不上，或这个词不在收录范围内。本句译文仍然可用。</div>
+              <button class="trace-pop-retry" data-act="retry">↻ 重新查询</button>
+            </div>`
+          : ''
+      }
       ${
         // 这句里它译成了什么 —— 比词典义更贴合当前语境，放最前面，
         // 让用户先看到「复古」再看词典的「优质的」，就不会觉得两边打架。
@@ -2172,6 +2312,11 @@
 
   document.addEventListener('click', (e) => {
     if (popupEl && !popupEl.classList.contains('trace-hidden')) {
+      // isConnected 这一条是「重新查询」必须的：那个处理器会把卡片 innerHTML
+      // 整个重建，等事件冒泡到这里时 e.target（原按钮）已经脱离文档，
+      // popupEl.contains(e.target) 变成 false —— 卡片会被判定成「点了外面」
+      // 而立刻关闭，用户看到的是按钮点下去后卡片直接消失。
+      if (!e.target.isConnected) return;
       if (!popupEl.contains(e.target) && !e.target.closest('.trace-word, .trace-saved-zh')) hidePopup();
     }
   });

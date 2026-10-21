@@ -19,12 +19,14 @@ const SUITES = [
   'test-global.js',
   'test-dodge.js',
   'test-dict.js',
+  'test-prefetch.js',
   'test-phrase.js',
   'test-invisible.js',
   'test-llm.js',
   'test-split.js',
   'test-card.js',
   'test-review.js',
+  'test-reviewpage.js',
   'test-align.js',
 ];
 

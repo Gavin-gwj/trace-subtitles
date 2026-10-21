@@ -13,6 +13,7 @@
   "host_permissions": [
     "https://*.youtube.com/*",
     "https://translate.googleapis.com/*",
+    "https://clients5.google.com/*",
     "https://api.mymemory.translated.net/*",
     "https://api.dictionaryapi.dev/*",
     "https://api.datamuse.com/*"

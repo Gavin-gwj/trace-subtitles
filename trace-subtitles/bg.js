@@ -56,6 +56,10 @@ const DEFAULT_SETTINGS = {
   llmTimeoutMs: 30000, // 单次请求超时；批量翻译比查词慢，给宽一些
   llmBatch: 12, // 每次请求送多少句（大模型上下文够，但太大易超时）
   llmTemperature: 0.2,
+  // ---- 复习页 ----
+  // 每日复习目标（道数）。0 = 不设目标，打卡环只显示当天完成量。
+  // 放在设置里而不是页面 localStorage：换机器恢复备份后目标还在。
+  reviewGoal: 20,
 };
 
 // ---------------------------------------------------------------- 网络工具
@@ -92,7 +96,10 @@ async function setSettings(patch) {
 // ---------------------------------------------------------------- IndexedDB
 
 const DB_NAME = 'trace-subs';
-const DB_VER = 2;
+// v3：新增 reviewlog（复习打卡流水）。为什么不能只靠 words.lastReview：
+// 那是「这个词上次被复习的时间」，一个字段只能表达一个时刻，无法回答
+// 「我这周打了几天卡、昨天复习了几个词」。打卡必须有按天的事件流水。
+const DB_VER = 3;
 let dbPromise = null;
 
 function openDB() {
@@ -114,6 +121,16 @@ function openDB() {
       // 之后 Service Worker 取出来就能静默读写那个目录。
       if (!db.objectStoreNames.contains('meta')) {
         db.createObjectStore('meta', { keyPath: 'key' });
+      }
+      // v3：复习打卡流水。一条记录 = 一次评级。
+      // id 由「时间戳|词|档位」拼成而不是自增：备份合并回来时同一条流水
+      // 必须落在同一个 id 上，否则反复恢复会把打卡天数越叠越多。
+      // 两个索引：at 用于连续天数/热力图按时间扫，day 用于「今天做了几道」。
+      // 用户可能从 v1 直接升到 v3，所以每个 store 都单独判 contains。
+      if (!db.objectStoreNames.contains('reviewlog')) {
+        const r = db.createObjectStore('reviewlog', { keyPath: 'id' });
+        r.createIndex('at', 'at');
+        r.createIndex('day', 'day');
       }
     };
     req.onsuccess = () => resolve(req.result);
@@ -207,7 +224,7 @@ function sanitizeForQuery(s) {
 }
 
 /** 请求一次 Google 端点，返回按顺序的译文数组；结构异常时抛错 */
-async function googleOnce(texts, sl, tl, host, client) {
+async function googleOnce(texts, sl, tl, host, client, ms = 10000) {
   const url =
     `https://${host}/translate_a/t?client=${client}` +
     `&sl=${encodeURIComponent(sl)}&tl=${encodeURIComponent(tl)}&dt=t`;
@@ -220,7 +237,7 @@ async function googleOnce(texts, sl, tl, host, client) {
       headers: { 'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8' },
       body,
     },
-    10000
+    ms
   );
   if (!res.ok) throw new Error('google http ' + res.status);
 
@@ -244,35 +261,65 @@ async function googleTranslate(texts, source, target) {
   const tl = normLang(target);
   const wanted = source === 'auto' ? 'auto' : normLang(source);
 
-  // 依次尝试：主端点 → 备用主机 → 备用 client
-  const plans = [
-    ['translate.googleapis.com', 'gtx', wanted],
-    ['clients5.google.com', 'dict-chrome-ex', wanted],
-    // 指定源语言时如果"原样返回"，说明语言猜错了，再用 auto 试一次
-    ['translate.googleapis.com', 'gtx', wanted === 'auto' ? null : 'auto'],
-  ];
+  // 超时按批次长度给：查词那种 1~10 条的短请求没必要等 10s，
+  // 而整页字幕（几百条）确实需要更久。
+  const ms = Math.min(10000, 1500 + texts.length * 300);
 
-  let last = null;
-  for (const [host, client, sl] of plans) {
-    if (!sl) continue;
-    let out;
-    try {
-      out = await googleOnce(texts, sl, tl, host, client);
-    } catch (_) {
-      continue;
-    }
-    last = out;
+  // 两个主机**并发**发出，谁先给出有效译文就用谁。
+  //
+  // 为什么不再串行：旧代码是 for 循环依次尝试，第一个端点挂住就白等满
+  // 整个超时，才轮到第二个 —— 用户看到的就是「一直查询中…」。
+  // 实测两个主机都是 0.5~0.8s 的常态响应，并发只是多一次无成本的请求。
+  //
+  // 注意 clients5 必须同时出现在 manifest 的 host_permissions 里，
+  // 否则 Service Worker 里的 fetch 会因为缺权限直接失败（等于只有一路）。
+  const tryHost = async (host, client) => {
+    const out = await googleOnce(texts, wanted, tl, host, client, ms);
     const got = out.filter((s) => s && s.trim()).length;
-    if (!got) continue; // 全空 → 换下一个方案
-    // 译文和原文完全一样，且源语言不是 auto：疑似语言猜错，继续试 auto
-    const sameAsInput =
-      sl !== 'auto' && out.every((s, i) => s === texts[i] || !s);
-    if (sameAsInput && plans.some((p) => p[2] === 'auto')) continue;
+    if (!got) throw new Error('empty');
     return out;
+  };
+
+  const racers = [
+    tryHost('translate.googleapis.com', 'gtx'),
+    tryHost('clients5.google.com', 'dict-chrome-ex'),
+  ];
+  const results = await Promise.allSettled(racers);
+
+  let best = null;
+  let anySuccess = false;
+  for (const r of results) {
+    if (r.status === 'fulfilled' && r.value) {
+      anySuccess = true;
+      // 优先取「没有原样返回」的那一份（原样返回说明语言猜错了）
+      const same =
+        wanted !== 'auto' && r.value.every((s, i) => s === texts[i] || !s);
+      if (!same) return r.value;
+      best = best || r.value;
+    }
+  }
+  if (best) return best;
+
+  // 到这里只剩两种情况：两路都网络失败，或两路都「原样返回」。
+  //
+  // 只有「原样返回」才值得再用 auto 试一次 —— 那说明语言猜错了，
+  // 换 auto 有意义。两路都**网络失败**时再试 auto 是纯浪费：
+  // 同一个域名、同样的网络条件，只会再白等一个完整超时，
+  // 实测这让最坏延迟多加 3.9s（查词卡在「查询中…」的主要原因）。
+  if (anySuccess && wanted !== 'auto') {
+    try {
+      const out = await googleOnce(
+        texts,
+        'auto',
+        tl,
+        'translate.googleapis.com',
+        'gtx',
+        ms
+      );
+      if (out.some((s) => s && s.trim())) return out;
+    } catch (_) {}
   }
 
-  // 全都拿不到有效译文 → 抛错，交给 MyMemory 兜底
-  if (last && last.some((s) => s && s.trim())) return last;
   throw new Error('google returned empty translation');
 }
 
@@ -1400,108 +1447,205 @@ function detailPreset(name) {
  *    dictionaryapi.dev 更适合判断"这个词在这句话里是哪个意思"。
  * 2. dictionaryapi.dev 作为补充：它带 `example` 例句，Datamuse 没有。
  *
+ * ## 并发（真实性能 bug）
+ *
+ * 旧代码是「先 Datamuse 等完 → 再 dictionaryapi 等完」的串行链，
+ * 而且 normal 档 `wantExample: true` 让 `needMore` 恒为真，所以**每个新词
+ * 都要白等第二个源**。实测（开代理后）：Datamuse ≈ 0.3–1.0s，
+ * dictionaryapi ≈ 0.7–8s 且约 1/3 概率直接超时。串行时单个词的词典阶段
+ * 就要 4s + 3.5s = 7.5s 上限，用户感受就是「有的词点下去半天没反应」。
+ *
+ *   现在两个源**同时发起**，各自带独立超时，谁先到先用：
+ *    · 词典阶段上限从 7.5s 降到 3s 左右
+ *    · dictionaryapi 慢/挂时，Datamuse 已经拿到的义项照常可用
+ *      （normal 档的「例句」本来就是锦上添花，不值得为它多等 3.5s）
+ *
+ * ## 「达标就提前收工」（第二轮性能修复）
+ *
+ * 只做并发还不够：基准脚本（tools/bench-dict.mjs）实测 8 个词，
+ * 有 4 个反而变慢 —— 因为 `Promise.allSettled` 会死死等满最慢的那个
+ * dictionaryapi（它 1/3 概率超时）。既然 Datamuse 通常 0.3s 就回来了，
+ * 而 dictionaryapi 只是补例句，就没理由让快的等慢的：
+ *
+ *   · Datamuse 已够用（有音标 + ≥2 条义项）→ dictionaryapi 只再等 900ms
+ *   · Datamuse 没结果/不够用 → 老老实实等 dictionaryapi 的完整 2500ms
+ *
+ * 这样「常见词」的词典阶段 ≈ 0.3~1.2s，「冷僻词」最差也就 3s。
+ *
  * 两个源都失败时返回空结构，让上层只用 Google 直译（至少卡片不空）。
  */
 async function fetchDict(word, preset) {
   const out = { phonetic: '', meanings: [], example: '', source: '' };
+  const w = word.toLowerCase();
+
+  // 两个源**立即并发**启动。dictionaryapi 的 promise 必须自带 catch，
+  // 否则我们在下面提前不等它时，它会以 unhandled rejection 的形式报错。
+  const dmPromise = fetchT(
+    'https://api.datamuse.com/words?sp=' + encodeURIComponent(word) + '&md=dpr&max=1',
+    {},
+    3000
+  )
+    .then((r) => (r.ok ? r.json() : null))
+    .catch(() => null);
+
+  const daPromise = fetchT(
+    'https://api.dictionaryapi.dev/api/v2/entries/en/' + encodeURIComponent(word),
+    {},
+    2500
+  )
+    .then((r) => (r.ok ? r.json() : null))
+    .catch(() => null);
 
   // ---- 源 1：Datamuse（快、稳、带领域标注）----
-  try {
-    const r = await fetchT(
-      'https://api.datamuse.com/words?sp=' +
-        encodeURIComponent(word) +
-        '&md=dpr&max=1',
-      {},
-      4000
-    );
-    if (r.ok) {
-      const arr = await r.json();
-      const e = Array.isArray(arr) ? arr[0] : null;
-      // 必须校验拼写完全相同：sp= 是模糊匹配，查 vessel 也可能返回 vessels
-      if (e && String(e.word || '').toLowerCase() === word.toLowerCase()) {
-        // tags 形如 ["n","v","pron:V EH1 S AH0 L "]；pron 里是音节化的发音提示
-        const tags = e.tags || [];
-        const pronTag = tags.find((t) => t.startsWith('pron:'));
-        if (pronTag) out.phonetic = pronTag.slice(5).trim();
-        // defs 形如 ["n\tA craft for transportation...", "v\t(transitive) To put..."]
-        for (const d of (e.defs || []).slice(0, preset.maxMeanings)) {
-          const tab = d.indexOf('\t');
-          const rawPos = tab >= 0 ? d.slice(0, tab) : '';
-          const def = (tab >= 0 ? d.slice(tab + 1) : d).trim();
-          if (!def) continue;
-          const pos = POS_MAP[rawPos] || POS_MAP[rawPos[0]] || '';
-          out.meanings.push({ pos, def, defZh: '', example: '', exampleZh: '' });
-        }
-        if (out.meanings.length) out.source = 'datamuse';
-      }
+  const dmArr = await dmPromise;
+  const dm = Array.isArray(dmArr) ? dmArr[0] : null;
+  // 必须校验拼写完全相同：sp= 是模糊匹配，查 vessel 也可能返回 vessels
+  if (dm && String(dm.word || '').toLowerCase() === w) {
+    // tags 形如 ["n","v","pron:V EH1 S AH0 L "]；pron 里是音节化的发音提示
+    const tags = dm.tags || [];
+    const pronTag = tags.find((t) => t.startsWith('pron:'));
+    if (pronTag) out.phonetic = pronTag.slice(5).trim();
+    // defs 形如 ["n\tA craft for transportation...", "v\t(transitive) To put..."]
+    for (const d of (dm.defs || []).slice(0, preset.maxMeanings)) {
+      const tab = d.indexOf('\t');
+      const rawPos = tab >= 0 ? d.slice(0, tab) : '';
+      const def = (tab >= 0 ? d.slice(tab + 1) : d).trim();
+      if (!def) continue;
+      const pos = POS_MAP[rawPos] || POS_MAP[rawPos[0]] || '';
+      out.meanings.push({ pos, def, defZh: '', example: '', exampleZh: '' });
     }
-  } catch (_) {
-    /* 源 1 失败继续试源 2 */
+    if (out.meanings.length) out.source = 'datamuse';
   }
 
   // ---- 源 2：dictionaryapi.dev（补音标与例句）----
-  // 已经拿到音标和足够义项时就不必再请求，省一次往返也省一次超时风险
-  const needMore = !out.phonetic || out.meanings.length < 2 || preset.wantExample;
-  if (needMore) {
-    try {
-      const r = await fetchT(
-        'https://api.dictionaryapi.dev/api/v2/entries/en/' + encodeURIComponent(word),
-        {},
-        3500
-      );
-      if (r.ok) {
-        const arr = await r.json();
-        const e = Array.isArray(arr) ? arr[0] : null;
-        if (e) {
-          if (!out.phonetic) {
-            out.phonetic =
-              e.phonetic || (e.phonetics || []).map((p) => p.text).find(Boolean) || '';
-          }
-          // Datamuse 已经有义项时，这里只补例句和缺的词性，
-          // 不重复堆一遍释义（否则卡片上同一条意思出现两次）
-          if (!out.meanings.length) {
-            (e.meanings || []).slice(0, 4).forEach((m) => {
-              (m.definitions || []).slice(0, preset.perPos).forEach((d) => {
-                if (out.meanings.length >= preset.maxMeanings) return;
-                out.meanings.push({
-                  pos: POS_MAP[m.partOfSpeech] || m.partOfSpeech || '',
-                  def: d.definition || '',
-                  defZh: '',
-                  example: d.example || '',
-                  exampleZh: '',
-                });
-              });
-            });
-          }
-          if (!out.example) {
-            out.example =
-              (e.meanings || [])
-                .flatMap((m) => m.definitions || [])
-                .map((d) => d.example)
-                .find(Boolean) || '';
-          }
-          if (!out.source) out.source = 'dictionaryapi';
-        }
-      }
-    } catch (_) {
-      /* 源 2 失败，用已有的 */
+  // Datamuse 已经够用就只给它一小段宽限期，不为例句牺牲体感速度。
+  const dmGoodEnough = !!out.phonetic && out.meanings.length >= 2;
+  let daArr = null;
+  if (dmGoodEnough) {
+    daArr = await Promise.race([daPromise, sleepMs(DA_GRACE_MS).then(() => null)]);
+  } else {
+    daArr = await daPromise;
+  }
+
+  const da = Array.isArray(daArr) ? daArr[0] : null;
+  if (da) {
+    if (!out.phonetic) {
+      out.phonetic = da.phonetic || (da.phonetics || []).map((p) => p.text).find(Boolean) || '';
     }
+    // Datamuse 已经有义项时，这里只补例句和缺的词性，
+    // 不重复堆一遍释义（否则卡片上同一条意思出现两次）
+    if (!out.meanings.length) {
+      (da.meanings || []).slice(0, 4).forEach((m) => {
+        (m.definitions || []).slice(0, preset.perPos).forEach((d) => {
+          if (out.meanings.length >= preset.maxMeanings) return;
+          out.meanings.push({
+            pos: POS_MAP[m.partOfSpeech] || m.partOfSpeech || '',
+            def: d.definition || '',
+            defZh: '',
+            example: d.example || '',
+            exampleZh: '',
+          });
+        });
+      });
+    }
+    if (!out.example) {
+      out.example =
+        (da.meanings || [])
+          .flatMap((m) => m.definitions || [])
+          .map((d) => d.example)
+          .find(Boolean) || '';
+    }
+    if (!out.source) out.source = 'dictionaryapi';
   }
 
   return out;
 }
 
-async function lookupWord(word) {
+/** Datamuse 已够用后，额外等 dictionaryapi 补例句的宽限期 */
+const DA_GRACE_MS = 900;
+
+/** 可取消的 sleep（配合 Promise.race 用，避免留下悬挂的 timer） */
+function sleepMs(ms) {
+  return new Promise((resolve) => {
+    const t = setTimeout(resolve, ms);
+    // Node/浏览器都能用 unref 的场景很少，这里只做尽力而为
+    if (t && typeof t.unref === 'function') t.unref();
+  });
+}
+
+/**
+ * 一次查词里「词典源全挂、连直译也没拿到」时，缓存只保留这么久。
+ *
+ * ## 为什么必须有过期（真实 bug，用户 m01142 报障）
+ *
+ * 旧代码查完无条件 `idbPut`，包括**一个字段都没拿到**的结果。于是只要有一次
+ * 网络抖（Datamuse 超时 + dictionaryapi 530 + Google 三个端点全空），
+ * 这个词就被永久钉成「空卡」：标题 + 本句译文 + 加入生词本，中间什么都没有。
+ * 之后无论网络恢复与否，`lookupWord` 第一次就命中这份空缓存、直接返回，
+ * 用户看到的永远是同一张空卡 —— 而他当时选的短语走的是另一条路径
+ * （`lookupPhrase` 里 `if (!result.gloss) return null`，空结果不落盘），
+ * 所以表现为「单独点词没解释，两个词一起查才有」。
+ *
+ * 复现证据：断掉三个域后请求 dict('chill') 得到 `meanings:0, zh:''`；
+ * 恢复网络再请求，返回值**逐字节相同**；手动删掉缓存键后立刻变成
+ * `meanings:6, source:'datamuse'`。
+ *
+ * 完整的词典条目仍然永久缓存（省网络、省额度）。
+ */
+const DICT_PARTIAL_TTL = 5 * 60 * 1000;
+
+/** 这条词典结果是不是「什么都没查到」 */
+function dictIsEmpty(d) {
+  if (!d) return true;
+  return !(d.meanings || []).length && !String(d.zh || '').trim();
+}
+
+/**
+ * 这条词典结果是不是「残缺」——有英文义项但**一个中文字都没有**。
+ *
+ * ## 为什么要单独判（真实 bug）
+ *
+ * `dictIsEmpty` 只认「两个都没有」。但只要 Datamuse 回了英文义项、
+ * 而随后的 Google 批量翻译整批失败（限流/网络抖动），拿到的就是
+ * `meanings:6, zh:'', 没有一条 defZh` 的卡片：有音标、有一堆英文，
+ * 却**一个中文都没有**。旧代码判它「非空」，于是永久写进缓存。
+ *
+ * 之后无论网络怎么恢复，这个词都命中这份缓存直接返回 —— 用户再点
+ * 一百次也还是那张没中文的卡，而且因为没有失败迹象，连「重新查询」
+ * 都救不回来（除非手动 force）。表现为「有些词点了没翻译，换个词正常」。
+ *
+ * 这类残缺条目按 DICT_PARTIAL_TTL 过期重查。
+ */
+function dictIsPartial(d) {
+  if (dictIsEmpty(d)) return true;
+  const hasZh =
+    String(d.zh || '').trim() ||
+    (d.meanings || []).some((m) => String(m.defZh || '').trim());
+  return !hasZh;
+}
+
+async function lookupWord(word, opts) {
   const w = word.trim();
   if (!w) return null;
-  // dict3：换词典源（Datamuse 优先）+ 详细程度分档，旧缓存没有 posKey，
-  // 也不一定有多义项，必须换版本号让用户刷新后能看到新卡片。
+  // dict4：旧键（dict3）里可能已经躺着大量「查空」的条目，
+  // 换版本号让它们一次性失效 —— 否则老用户升级后看到的还是空卡。
+  // dict3 → dict4 的唯一原因是上面那段 DICT_PARTIAL_TTL 的修复。
+  // dict4 → dict5：新增 dictIsPartial，旧键里可能躺着「有英文没中文」的残卡。
   const st = await getSettings();
   const detail = st.dictDetail || 'normal';
   const preset = detailPreset(detail);
-  const key = 'dict3|' + detail + '|' + w.toLowerCase();
-  const cached = await idbGet('translations', key);
-  if (cached && cached.dict) return cached.dict;
+  const key = 'dict5|' + detail + '|' + w.toLowerCase();
+  const force = !!(opts && opts.force);
+  if (!force) {
+    const cached = await idbGet('translations', key);
+    if (cached && cached.dict) {
+      // 空/残缺条目只在 TTL 内可信，过期就重查（通常网络已经恢复）
+      const fresh =
+        !dictIsPartial(cached.dict) ||
+        Date.now() - (cached.createdAt || 0) < DICT_PARTIAL_TTL;
+      if (fresh) return cached.dict;
+    }
+  }
 
   const dict = {
     word: w,
@@ -1545,8 +1689,44 @@ async function lookupWord(word) {
     .filter((m) => m.defZh || m.def)
     .map((m) => ({ pos: m.pos, posKey: posKeyOf(m.pos), text: m.defZh || m.def }));
 
+  // 写缓存：完整条目长期保留；「什么都没查到」和「有英文没中文」的残缺条目
+  // 留着但会被 DICT_PARTIAL_TTL 判过期，下次点同一个词会重查。
+  // 不区分就会重现 m01142 的永久空卡 / 永久无中文卡。
   await idbPut('translations', { key, dict, createdAt: Date.now() });
   return dict;
+}
+
+/**
+ * 同一个词的并发查词请求合并成一次网络往返。
+ *
+ * ## 为什么需要（预取带来的新问题）
+ *
+ * 预取是"猜用户要点哪个词"，猜错了没有代价，但如果猜对了、而用户又在
+ * 预取还没完成时就点了下去，就会有两个 lookupWord 同时跑同一个词：
+ * 两次 Datamuse + 两次 dictionaryapi + 两次 Google 批量翻译。
+ * 除了浪费额度，更糟的是点击那个请求被排在预取后面，反而**更慢**。
+ *
+ * 这里按「详细程度 + 词」做在途合并：同一时刻只有一个真实请求，
+ * 后到的直接复用它的 promise。force（重新查询）不参与合并，
+ * 因为它语义上要求绕过一切缓存。
+ */
+const inflightDict = new Map();
+
+function lookupWordDeduped(word, opts) {
+  const w = String(word || '').trim().toLowerCase();
+  if (!w) return Promise.resolve(null);
+  if (opts && opts.force) return lookupWord(word, opts);
+
+  const key = w + '|' + ((opts && opts.detail) || '');
+  const hit = inflightDict.get(key);
+  if (hit) return hit;
+
+  const p = lookupWord(word, opts).finally(() => {
+    // 只在还是自己那一份时才删，避免把后来的新请求误删
+    if (inflightDict.get(key) === p) inflightDict.delete(key);
+  });
+  inflightDict.set(key, p);
+  return p;
 }
 
 // ---------------------------------------------------------------- 短语查词
@@ -1741,6 +1921,12 @@ async function addWord(payload) {
     reviewCount: existing ? existing.reviewCount || 0 : 0,
     lastReview: existing ? existing.lastReview || null : null,
     status: existing ? existing.status || 'new' : 'new',
+    // 记忆评级计数：抽屉里「忘记了 / 模糊 / 记住了」的细分。
+    // reviewCount 仍然是总次数（= 三者之和），所以老记录不需要迁移；
+    // 缺字段就是 0，旧备份恢复进来的记录同理。
+    forgetCount: existing ? existing.forgetCount || 0 : 0,
+    fuzzyCount: existing ? existing.fuzzyCount || 0 : 0,
+    rememberCount: existing ? existing.rememberCount || 0 : 0,
   };
   // 短语专有字段：只有短语才写，避免单词记录里堆一堆空字段
   if (kind === 'phrase') {
@@ -1810,12 +1996,19 @@ async function broadcastWordsChanged() {
 
 // ---------------------------------------------------------------- 自动备份节流
 //
-// 生词变动（加词/删词/复习）都会触发备份，但用户可能连续点好几个词，
-// 每次都下载一个文件会刷屏。所以合并成一次：30 秒内最多写一次盘。
+// 生词变动（加词/删词/复习）都会触发备份。用户可能连续点好几个词，
+// 每次都写一个文件会刷屏，所以合并成一次：30 秒内最多写一次盘。
 //
-// 另一个真实风险：Chrome 设置里若开了「下载前询问每个文件的保存位置」，
-// chrome.downloads.download 即使 saveAs:false 也可能弹框。自动备份反复弹框
-// 比不备份还糟，所以连续失败 3 次就自动关掉自动备份（只留手动备份）。
+// **自动备份只写用户选定的目录，绝不退回「下载」**。
+// 原因是一次真实的抱怨：没选目录时每次复习都会往「下载」扔一个
+// wordbook-backup.json，Chrome 下载列表里堆成 4 条 47~53KB 的同名文件；
+// 如果系统开了「下载前询问保存位置」，还会每 30 秒弹一次保存框。
+// 静默写入用户指定的目录是自洽的；往别人的下载目录里反复塞文件不是。
+// 没有目录时自动备份直接跳过（记 skipped），用户在词库页手动点备份
+// 才走下载兜底 —— 那是明确的意图，见 backupToFile({ download:true })。
+//
+// 另一个真实风险：目录权限可能因为浏览器重启退化成 prompt 且被拒，
+// 连续失败 3 次就关掉自动备份，只留手动备份。
 
 let autoBackupTimer = null;
 const AUTO_BACKUP_GAP = 30000;
@@ -1830,10 +2023,11 @@ function scheduleAutoBackup() {
       if (st.autoBackup === false) return;
       const last = st.lastBackupAt || 0;
       if (Date.now() - last < AUTO_BACKUP_GAP) return;
-      await backupToFile();
+      const r = await backupToFile({ download: false });
+      if (!r || r.skipped) return; // 没选目录：静默跳过，不算失败也不写盘
       await setSettings({ lastBackupAt: Date.now(), autoBackupFails: 0 });
     } catch (e) {
-      // 自动备份失败不打扰用户（可能是权限被拒、下载被拦、或弹框被取消），
+      // 自动备份失败不打扰用户（可能是权限被拒、或用户取消了授权），
       // 手动点「备份到文件」时会拿到明确报错。
       const st = await getSettings().catch(() => ({}));
       const fails = (st.autoBackupFails || 0) + 1;
@@ -1904,6 +2098,171 @@ async function reviewWord(word) {
   rec.lastReview = Date.now();
   rec.status = rec.reviewCount >= 3 ? 'learned' : 'learning';
   await idbPut('words', rec);
+  // 不分类的「记一次」也算打卡：用户确实复习了一道题。
+  // 流水里 grade 记成 'review'，统计时计入总复习量但不计入三档分布。
+  await logReview(key, 'review', rec);
+  scheduleAutoBackup();
+  return rec;
+}
+
+/**
+ * 记忆评级：抽屉里的「忘记了 / 模糊 / 记住了」。
+ *
+ * 与 reviewWord 的关系：reviewWord 是「复习了一次」的粗粒度记账（旧的
+ * 「标记复习」按钮一直在用，弹窗里也有），这里是在它之上加了**结果分类**。
+ * 两者都推进 reviewCount，所以 totals 不会打架：reviewCount 始终等于
+ * forgetCount + fuzzyCount + rememberCount + （旧版 reviewWord 记的那些）,
+ * 也就是说老记录不需要迁移 —— 缺字段当 0，总数仍然对得上（可能略大于
+ * 三细项之和，差额就是历史里那些没分类的复习，界面按「未分类」处理）。
+ *
+ * 状态语义与 markLearned 保持一致：「记住了」一次到位置为 learned
+ * （用户可以再手动改回来）；「忘记」「模糊」则退回 learning —— 诚实反映
+ * 「还没掌握」，同时把下一次复习提前。
+ */
+const RATE_FIELD = {
+  forget: 'forgetCount',
+  fuzzy: 'fuzzyCount',
+  remember: 'rememberCount',
+};
+
+async function rateWord(word, grade) {
+  const key = String(word).toLowerCase();
+  const field = RATE_FIELD[grade];
+  if (!field) return null;
+  const rec = await idbGet('words', key);
+  if (!rec) return null;
+  rec.reviewCount = (rec.reviewCount || 0) + 1;
+  rec[field] = (rec[field] || 0) + 1;
+  rec.lastReview = Date.now();
+  rec.status = grade === 'remember' ? 'learned' : 'learning';
+  await idbPut('words', rec);
+  // 评级同时落一条打卡流水。放在这里而不是复习页里，是为了让生词本抽屉里的
+  // 三档评级也计入打卡 —— 同一个动作不该因为入口不同就不算数。
+  await logReview(key, grade, rec);
+  await broadcastWordsChanged();
+  scheduleAutoBackup();
+  return rec;
+}
+
+// ---------------------------------------------------------------- 复习打卡
+//
+// 为什么单独建一张表：词表里只有一个 lastReview 时间戳，它能回答「这个词
+// 上次复习是什么时候」，但回答不了「我这周打了几天卡」。连续天数需要
+// 「有复习行为的日期集合」，热力图需要「每天的复习量」，这两个都是流水
+// 才能算出来的东西，所以 v3 加了 reviewlog store。
+//
+// 记录形状（尽量扁，几万条也不心疼）：
+//   { id, at, day, word, grade }
+// id 是 `at|word|grade` —— 用内容定 id 而不是自增，是为了让备份合并幂等：
+// 同一个动作被合并两次会命中同一个 id，覆盖而不是新增。
+
+/** 本地日期的 YYYY-MM-DD。不能用 toISOString：那是 UTC，UTC+8 的凌晨会被算到前一天。 */
+function dayKey(ts) {
+  const d = new Date(ts || Date.now());
+  const p = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
+async function logReview(word, grade, rec) {
+  const at = (rec && rec.lastReview) || Date.now();
+  const id = `${at}|${word}|${grade}`;
+  await idbPut('reviewlog', {
+    id,
+    at,
+    day: dayKey(at),
+    word: String(word),
+    grade: grade || 'review',
+  });
+  return id;
+}
+
+/**
+ * 打卡统计：一次把复习页需要的全部聚合数据算好。
+ * 放在 SW 里而不是页面里，是因为页面只需要「结果」，不该为了画 90 天热力图
+ * 把几万条流水都读进内存再算。
+ */
+async function reviewStats() {
+  const [log, words] = await Promise.all([idbAll('reviewlog'), listWords()]);
+  const byDay = new Map();
+  for (const e of log) {
+    const d = e.day || dayKey(e.at);
+    const cur = byDay.get(d) || { day: d, n: 0, forget: 0, fuzzy: 0, remember: 0 };
+    cur.n += 1;
+    if (e.grade === 'forget') cur.forget += 1;
+    else if (e.grade === 'fuzzy') cur.fuzzy += 1;
+    else if (e.grade === 'remember') cur.remember += 1;
+    byDay.set(d, cur);
+  }
+  const days = [...byDay.values()].sort((a, b) => (a.day < b.day ? -1 : 1));
+
+  // 连续天数：从今天往回数。今天还没复习时不能直接判 0 —— 那样用户下午
+  // 打开页面会看到「连续 0 天」，昨天的 7 天记录像是被清零了。所以往回
+  // 探一天：昨天有记录就从昨天开始数，今天补上就续上。
+  const today = dayKey(Date.now());
+  const yesterday = dayKey(Date.now() - 86400000);
+  let streak = 0;
+  if (byDay.has(today) || byDay.has(yesterday)) {
+    let cursor = byDay.has(today) ? Date.now() : Date.now() - 86400000;
+    for (let i = 0; i < 4000; i += 1) {
+      if (!byDay.has(dayKey(cursor))) break;
+      streak += 1;
+      cursor -= 86400000;
+    }
+  }
+  let best = 0;
+  let run = 0;
+  let prev = null;
+  for (const d of days) {
+    if (prev && dayKey(Date.parse(`${prev}T00:00:00`) + 86400000) === d.day) run += 1;
+    else run = 1;
+    if (run > best) best = run;
+    prev = d.day;
+  }
+
+  const total = log.length;
+  const graded = log.filter((e) => RATE_FIELD[e.grade]).length;
+  return {
+    today,
+    streak,
+    best,
+    total,
+    graded,
+    activeDays: days.length,
+    todayCount: (byDay.get(today) || {}).n || 0,
+    lastDay: days.length ? days[days.length - 1].day : null,
+    days,
+    // 词库侧的口径与看板一致：新词一律算待复习，learning 按间隔到期。
+    words: words.length,
+  };
+}
+
+async function clearReviewLog() {
+  await idbClear('reviewlog');
+  return true;
+}
+
+/** 手动指定记忆状态（抽屉底部 →「状态」）。不动复习计数，只改状态。 */
+async function setWordStatus(word, status) {
+  const key = String(word).toLowerCase();
+  if (!['new', 'learning', 'learned'].includes(status)) return null;
+  const rec = await idbGet('words', key);
+  if (!rec) return null;
+  rec.status = status;
+  // 手动置为「已记住」时把计数抬到门槛，避免下次复习把它打回 learning；
+  // 手动退回「新词」时清掉复习痕迹，让它重新进队列。
+  if (status === 'learned') {
+    rec.reviewCount = Math.max(rec.reviewCount || 0, 3);
+    rec.rememberCount = Math.max(rec.rememberCount || 0, 1);
+    if (!rec.lastReview) rec.lastReview = Date.now();
+  } else if (status === 'new') {
+    rec.reviewCount = 0;
+    rec.forgetCount = 0;
+    rec.fuzzyCount = 0;
+    rec.rememberCount = 0;
+    rec.lastReview = null;
+  }
+  await idbPut('words', rec);
+  await broadcastWordsChanged();
   scheduleAutoBackup();
   return rec;
 }
@@ -2004,19 +2363,28 @@ function fromBase64Utf8(b64) {
 async function buildBackup() {
   return {
     format: 'trace-subtitles-backup',
-    version: 1,
+    version: 2,
     exportedAt: new Date().toISOString(),
     settings: await getSettings(),
     words: await listWords(),
+    // version 2 起带上打卡流水。老备份没有这个字段，恢复时按空数组处理，
+    // 所以 version 只是标记，不代表旧备份不能恢复。
+    reviewlog: await idbAll('reviewlog'),
   };
 }
 
 /**
  * 写一份备份。
- * 优先写进用户选定的目录（静默、可指定位置）；没有选就退回「下载」目录。
- * 返回 { ok, filename, relPath, via, count, at }
+ *
+ * opts.download（默认 true）：没有选定目录时，是否退回「下载」目录。
+ *   - 手动点「立即备份」：true —— 用户明确要求落盘，家里没有目录就放下载。
+ *   - 自动备份：false —— 没有目录直接返回 { skipped:true }，不往下载目录扔文件。
+ *
+ * 返回 { ok, filename, relPath, via, count, at }，
+ * 或（自动路径且没有目录时）{ ok:true, skipped:true, reason:'no-dir' }。
  */
-async function backupToFile() {
+async function backupToFile(opts) {
+  const allowDownload = !opts || opts.download !== false;
   const data = await buildBackup();
   const json = JSON.stringify(data, null, 2);
 
@@ -2038,7 +2406,11 @@ async function backupToFile() {
     throw e;
   }
 
-  // 2) 兜底：下载目录
+  if (!allowDownload) {
+    return { ok: true, skipped: true, reason: 'no-dir', count: data.words.length };
+  }
+
+  // 2) 兜底：下载目录（只给手动备份用）
   const url = 'data:application/json;base64,' + toBase64Utf8(json);
   const id = await chrome.downloads.download({
     url,
@@ -2117,6 +2489,11 @@ async function restoreFromBackup(data, opts = {}) {
         createdAt: Math.min(old.createdAt || Infinity, w.createdAt || Infinity) || Date.now(),
         reviewCount: Math.max(old.reviewCount || 0, w.reviewCount || 0),
         lastReview: Math.max(old.lastReview || 0, w.lastReview || 0) || null,
+        // 评级细分计数同样「取大」：恢复旧备份不该把「忘记过 5 次」抹成 0，
+        // 否则遗忘率会被一次恢复洗白。
+        forgetCount: Math.max(old.forgetCount || 0, w.forgetCount || 0),
+        fuzzyCount: Math.max(old.fuzzyCount || 0, w.fuzzyCount || 0),
+        rememberCount: Math.max(old.rememberCount || 0, w.rememberCount || 0),
         status:
           (old.reviewCount || 0) >= (w.reviewCount || 0) ? old.status || 'new' : w.status || 'new',
       });
@@ -2128,8 +2505,60 @@ async function restoreFromBackup(data, opts = {}) {
   if (data.settings && typeof data.settings === 'object') {
     await setSettings(data.settings);
   }
+  // 打卡流水：老备份没有 reviewlog 字段（version 1），跳过即可。
+  // 合并策略是「只补不删」——把备份里有、本地没有的补进来。
+  // 因为 id 是内容定的（at|word|grade），同一份备份恢复两次不会重复计数。
+  // replace 模式下要连流水一起清，否则「恢复成另一个备份」会留下两份历史。
+  if (replace) await idbClear('reviewlog');
+  let logs = 0;
+  if (Array.isArray(data.reviewlog)) {
+    for (const e of data.reviewlog) {
+      if (!e || !e.at) continue;
+      const id = e.id || `${e.at}|${e.word || ''}|${e.grade || 'review'}`;
+      const old = await idbGet('reviewlog', id);
+      if (old) continue;
+      await idbPut('reviewlog', {
+        id,
+        at: e.at,
+        day: e.day || dayKey(e.at),
+        word: e.word || '',
+        grade: e.grade || 'review',
+      });
+      logs += 1;
+    }
+  }
   await broadcastWordsChanged();
-  return { ok: true, added, merged, total: data.words.length };
+  return { ok: true, added, merged, logs, total: data.words.length };
+}
+
+// 打开扩展自己的页面：已开着就切过去，没开才新建。
+// 用 runtime.getContexts 而不是 tabs.query：后者按 url 过滤需要 "tabs" 权限
+// （会触发「读取您的浏览记录」警告），getContexts 只查本扩展自己的页面，不需要。
+async function openExtPage(file) {
+  try {
+    const base = chrome.runtime.getURL(file);
+    let ctxs = [];
+    try {
+      ctxs = await chrome.runtime.getContexts({
+        contextTypes: ['TAB'],
+        documentUrls: [base],
+      });
+    } catch (_) {
+      ctxs = [];
+    }
+    const hit = (ctxs || []).find((c) => c.tabId != null && c.tabId >= 0);
+    if (hit) {
+      await chrome.tabs.update(hit.tabId, { active: true });
+      if (hit.windowId != null) {
+        try { await chrome.windows.update(hit.windowId, { focused: true }); } catch (_) {}
+      }
+      return { ok: true, via: 'focus' };
+    }
+    await chrome.tabs.create({ url: base });
+    return { ok: true, via: 'tab' };
+  } catch (e) {
+    return { ok: false, error: String((e && e.message) || e) };
+  }
 }
 
 // ---------------------------------------------------------------- 消息路由
@@ -2172,10 +2601,20 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           });
           break;
         case 'dict':
-          console.info('[Trace bg] dict start', msg.word);
           {
-            const d = await lookupWord(msg.word);
-            console.info('[Trace bg] dict done', msg.word, !!d);
+            // force:true 由卡片的「重新查询」按钮发起，跳过缓存直连网络。
+            // 空结果/残缺结果的缓存只在 DICT_PARTIAL_TTL 内有效，
+            // 但用户显然不想等那 5 分钟。
+            //
+            // prefetch:true 由内容脚本的句子预取发起（用户还没点击）。
+            // 它和点击走完全相同的 lookupWord，因此结果会落进同一份缓存 ——
+            // 这正是预取的价值：点下去时直接命中。
+            const prefetch = !!msg.prefetch;
+            if (!prefetch) {
+              console.info('[Trace bg] dict start', msg.word, msg.force ? '(force)' : '');
+            }
+            const d = await lookupWordDeduped(msg.word, { force: !!msg.force });
+            if (!prefetch) console.info('[Trace bg] dict done', msg.word, !!d);
             sendResponse({ ok: true, data: d });
           }
           break;
@@ -2234,8 +2673,23 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         case 'word:review':
           sendResponse({ ok: true, data: await reviewWord(msg.word) });
           break;
+        case 'word:rate':
+          sendResponse({ ok: true, data: await rateWord(msg.word, msg.grade) });
+          break;
+        case 'word:set-status':
+          sendResponse({ ok: true, data: await setWordStatus(msg.word, msg.status) });
+          break;
         case 'word:export':
           sendResponse({ ok: true, data: await exportWords() });
+          break;
+        case 'review:stats':
+          sendResponse({ ok: true, data: await reviewStats() });
+          break;
+        case 'review:log':
+          sendResponse({ ok: true, data: await idbAll('reviewlog') });
+          break;
+        case 'review:clear-log':
+          sendResponse({ ok: true, data: await clearReviewLog() });
           break;
         case 'cache:clear':
           await idbClear('translations');
@@ -2244,33 +2698,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         case 'open-wordbook':
           // 页内面板的「生词本」按钮 → 词库看板（wordbook.html）。
           // 已有看板标签页就切过去复用，避免开出一堆重复页面。
-          // 用 runtime.getContexts 而不是 tabs.query：后者按 url 过滤需要 "tabs" 权限
-          // （会触发「读取您的浏览记录」警告），getContexts 只查本扩展自己的页面，不需要。
-          try {
-            const base = chrome.runtime.getURL('wordbook.html');
-            let ctxs = [];
-            try {
-              ctxs = await chrome.runtime.getContexts({
-                contextTypes: ['TAB'],
-                documentUrls: [base],
-              });
-            } catch (_) {
-              ctxs = [];
-            }
-            const hit = (ctxs || []).find((c) => c.tabId != null && c.tabId >= 0);
-            if (hit) {
-              await chrome.tabs.update(hit.tabId, { active: true });
-              if (hit.windowId != null) {
-                try { await chrome.windows.update(hit.windowId, { focused: true }); } catch (_) {}
-              }
-              sendResponse({ ok: true, via: 'focus' });
-            } else {
-              await chrome.tabs.create({ url: base });
-              sendResponse({ ok: true, via: 'tab' });
-            }
-          } catch (e) {
-            sendResponse({ ok: false, error: String((e && e.message) || e) });
-          }
+          sendResponse(await openExtPage('wordbook.html'));
+          break;
+        case 'open-review':
+          // 复习页。同样复用已开的标签页 —— 复习到一半跑去生词本、再点回来，
+          // 不应该把进度丢掉重开一张。
+          sendResponse(await openExtPage('review.html'));
           break;
         case 'backup:save':
           // 手动备份：写进用户选定的目录，没选就退回「下载」
@@ -2325,14 +2758,15 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           sendResponse({ ok: true, data: await readBackupFromDir() });
           break;
         case 'backup:auto':
-          // 自动备份：仅在「自动备份」开关打开时执行，失败静默（不打扰用户）
+          // 自动备份：仅在「自动备份」开关打开时执行，失败静默（不打扰用户）。
+          // 只写用户选定的目录，没有目录就没有副作用（不往「下载」扔文件）。
           try {
             const st = await getSettings();
             if (st.autoBackup === false) {
-              sendResponse({ ok: true, data: { skipped: true } });
+              sendResponse({ ok: true, data: { skipped: true, reason: 'off' } });
               break;
             }
-            sendResponse({ ok: true, data: await backupToFile() });
+            sendResponse({ ok: true, data: await backupToFile({ download: false }) });
           } catch (e) {
             sendResponse({ ok: false, error: String((e && e.message) || e) });
           }
@@ -2384,7 +2818,12 @@ globalThis.__traceDebug = {
   wordForms,
   matchSaved,
   lookupWord,
+  lookupWordDeduped,
   fetchDict,
+  /** 「查空」判定：空结果只缓存 DICT_PARTIAL_TTL，不永久钉死 */
+  dictIsEmpty,
+  /** 「残缺」判定：有英文义项但一个中文都没有，同样按 TTL 过期重查 */
+  dictIsPartial,
   posKeyOf,
   detailPreset,
   /** 短语查词（多词整体释义 + 逐词对照），大模型优先、Google 兜底 */
@@ -2410,10 +2849,17 @@ globalThis.__traceDebug = {
   hasWord,
   removeWord,
   reviewWord,
+  /** 记忆评级：'forget' | 'fuzzy' | 'remember'（抽屉里的三个复习按钮） */
+  rateWord,
+  /** 手动指定状态：'new' | 'learning' | 'learned' */
+  setWordStatus,
   /** 每个已收藏词的记忆状态（{词: 'new'|'learning'|'learned'}） */
   wordStates,
   /** 手动标记「已经记住」：一次到位，不经过复习计数 */
   markLearned,
+  /** 复习打卡：聚合统计 / 原始流水 / 清空 */
+  reviewStats,
+  openExtPage,
   /** 测试辅助：直接改设置（与 'settings:set' 消息等价） */
   setSettings,
   /** 测试辅助：与消息路由 'word:remove' 同一条路径（删除 + 广播） */

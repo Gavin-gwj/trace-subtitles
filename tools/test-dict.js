@@ -61,10 +61,15 @@ function check(name, ok, extra) {
   });
 
   // ---- 假 YouTube：复用夹具，但字幕换成一句含 vintage 的 ----
-  const CUES = [
-    [0.0, 3.0, 'look. This is proper vintage.'],
-    [3.0, 2.0, 'This is proper vintage.'],
-  ];
+  // 时间窗必须远长于「加载 + 抓轨 + 翻译往返」的最坏耗时（教训同 test-card.js：
+  // 5 秒窗口在全量跑时会被播穿，字幕清空后既点不到词也等不到译文）。
+  //
+  // 但第一条 cue 必须是**单句**：扩展会把「句中句号」拆开并按时长比例分摊时间轴
+  // （见 test-split.js）。早先这里是 'look. This is proper vintage.'，
+  // 拉长到 30 秒后分摊成 look.(0–15s) / This is proper vintage.(15–30s)，
+  // 断言执行时还停在前半句，vintage 根本不在 DOM 里 → D1 失败。
+  // 逗号断句的覆盖交给 test-split.js，这里只要一句能稳定点到 vintage。
+  const CUES = [[0.0, 60.0, 'This is proper vintage.']];
   // 第二阶段用：语境义与词典直译**差别足够大**，断言才稳定。
   //
   // 早先这里用 immediately：词典义「立即地」、这句里的语境义「立即」，
@@ -74,8 +79,8 @@ function check(name, ok, extra) {
   // pick 的差别是结构性的：词典义「挑选」、这句里是「铁镐」（iron pick 是复合名词）。
   // 有 probe-pair2.js 实测支撑：「iron pick」→「铁镐」确实是主译文的字面子串。
   const CUES2 = [
-    [0.0, 3.0, 'He grabbed an iron pick and started digging.'],
-    [3.0, 2.0, 'She grabbed another iron pick.'],
+    [0.0, 30.0, 'He grabbed an iron pick and started digging.'],
+    [30.0, 30.0, 'She grabbed another iron pick.'],
   ];
   await ctx.route('https://www.youtube.com/**', async (route) => {
     const u = route.request().url();
@@ -577,6 +582,233 @@ function check(name, ok, extra) {
     'D18 语境义与直译不同时，两条都显示且能区分',
     /本句译作/.test(diffCard.ctxWord) && !!diffCard.gloss && /[\u4e00-\u9fff]/.test(diffCard.ctxWord),
     diffCard
+  );
+
+  // ---------------------------------------------------------------- D19–D21
+  //
+  // 回归 m01142：单词卡的「查空结果被永久缓存」。
+  //
+  // 现象：单独点 chill 只有标题 + 本句译文，中间什么释义都没有；而把
+  // chill secluded 两个词一起拖选反而有翻译。因为短语走 lookupPhrase，
+  // 空结果不落盘；单词走 lookupWord，旧代码无条件 idbPut ——
+  // 只要第一次点击时词典源抖一下，这个词就被永久钉成空卡。
+  //
+  // 这里用 route 把三个词典/翻译域全部 abort 来稳定复现「查空」，
+  // 而不是等真实网络抖动（那不可能在 CI 里稳定重现）。
+  // 缓存键版本必须跟 bg.js 里的 DICT_KEY 前缀保持一致。
+  // 每次升级（dict3→dict4→dict5）都是为了让旧版本里可能躺着的坏条目失效，
+  // 这里不同步就会去删一个根本不存在的键，D21 会假失败。
+  const DICT_KEY = 'dict5|normal|chill';
+  const BLOCKED = [
+    '**api.datamuse.com/**',
+    '**api.dictionaryapi.dev/**',
+    // googleTranslate 有三个 plan：translate.googleapis.com/gtx、
+    // clients5.google.com/dict-chrome-ex、translate.googleapis.com/gtx+auto。
+    // 只断前两个域不够 —— 第三个 plan 会拿到直译，dict.zh 非空就不算「查空」。
+    '**translate.googleapis.com/**',
+    '**clients5.google.com/**',
+  ];
+  const dropKey = (key) =>
+    sw.evaluate(async (k) => {
+      const db = await globalThis.__traceDebug.openDB();
+      await new Promise((res, rej) => {
+        const tx = db.transaction('translations', 'readwrite');
+        tx.objectStore('translations').delete(k);
+        tx.oncomplete = res;
+        tx.onerror = rej;
+      });
+    }, key);
+  const askWord = (w, opts) =>
+    sw.evaluate(
+      async ([word, o]) => {
+        const d = await globalThis.__traceDebug.lookupWord(word, o || {});
+        return {
+          empty: globalThis.__traceDebug.dictIsEmpty(d),
+          meanings: (d && d.meanings ? d.meanings.length : 0),
+          zh: (d && d.zh) || '',
+          source: (d && d.source) || '',
+        };
+      },
+      [w, opts || null]
+    );
+  const ageCachedDict = (key, ageMs) =>
+    sw.evaluate(
+      async ([k, age]) => {
+        const D = globalThis.__traceDebug;
+        const rec = await D.idbGet('translations', k);
+        if (!rec) return false;
+        rec.createdAt = Date.now() - age;
+        await D.idbPut('translations', rec);
+        return true;
+      },
+      [key, ageMs]
+    );
+
+  await dropKey(DICT_KEY);
+  for (const p of BLOCKED) await ctx.route(p, (r) => r.abort());
+  const brokenDict = await askWord('chill');
+  for (const p of BLOCKED) await ctx.unroute(p);
+  check(
+    'D19 词典源全挂时返回空结果（复现查空场景）',
+    brokenDict.empty === true && brokenDict.meanings === 0,
+    brokenDict
+  );
+
+  // 缓存仍然生效（否则每次点词都重打网络），但必须带 TTL：
+  // 刚写进去的空结果在 TTL 内仍返回空 —— 证明「有缓存」；
+  const withinTtl = await askWord('chill');
+  check(
+    'D20 空结果在 TTL 内仍走缓存（不会每次点词都重打网络）',
+    withinTtl.empty === true,
+    withinTtl
+  );
+
+  // 把缓存时间改成「很久以前」，模拟 TTL 过期 → 必须自动重查并拿到完整释义。
+  // 这一条就是 m01142 的修复本体：空结果不能永久钉死。
+  await ageCachedDict(DICT_KEY, 6 * 60 * 1000);
+  const afterTtl = await askWord('chill');
+  check(
+    'D21 空结果缓存过期后自动重查并恢复完整释义',
+    afterTtl.empty === false && afterTtl.meanings > 0 && !!afterTtl.source,
+    afterTtl
+  );
+
+  // force:true 是卡片上「重新查询」按钮的路径 —— 用户不该等那 5 分钟。
+  await dropKey(DICT_KEY);
+  for (const p of BLOCKED) await ctx.route(p, (r) => r.abort());
+  await askWord('chill');
+  for (const p of BLOCKED) await ctx.unroute(p);
+  const forced = await askWord('chill', { force: true });
+  check(
+    'D22 force:true 跳过缓存直连网络（卡片「重新查询」按钮）',
+    forced.empty === false && forced.meanings > 0,
+    forced
+  );
+
+  // 完整条目仍然长期缓存：再点一次不应重新请求（这里只看结果一致）
+  const again = await askWord('chill');
+  check(
+    'D23 完整条目照常走缓存（不因 TTL 逻辑而反复重查）',
+    again.empty === false && again.meanings === forced.meanings,
+    again
+  );
+
+  // ---------------------------------------------------------------- D24–D27
+  //
+  // 回归「点击翻译很慢」。
+  //
+  // 起因（用户报障）：「为什么有些单词点击翻译很慢」。根因不是某些词特殊，
+  // 而是「没缓存过 → 走完整链路」：旧代码把两个词典源串行等完（4s + 3.5s），
+  // 且 normal 档 wantExample 恒真导致第二个源每次都白等。
+  //
+  // D24 盯住并发合并：预取还没回来时用户点了同一个词，只能有一次真实请求。
+  // D25/D26 盯住残缺条目（有英文没中文）不能永久钉死。
+
+  const countCalls = { n: 0 };
+  const COUNTED = ['**api.datamuse.com/**', '**api.dictionaryapi.dev/**'];
+  const counter = (r) => {
+    countCalls.n++;
+    r.continue();
+  };
+  await dropKey(DICT_KEY);
+  for (const p of COUNTED) await ctx.route(p, counter);
+  // 三个同词并发走 lookupWordDeduped（预取与点击的真实关系）
+  const deduped = await sw.evaluate(async () => {
+    const D = globalThis.__traceDebug;
+    const [a, b, c] = await Promise.all([
+      D.lookupWordDeduped('chill', {}),
+      D.lookupWordDeduped('chill', {}),
+      D.lookupWordDeduped('chill', {}),
+    ]);
+    return {
+      same: a === b && b === c,
+      meanings: a ? a.meanings.length : 0,
+    };
+  });
+  for (const p of COUNTED) await ctx.unroute(p);
+  check(
+    'D24 同词并发查词只发一次网络请求（预取与点击在途合并）',
+    deduped.same === true && deduped.meanings > 0 && countCalls.n <= 2,
+    { deduped, networkCalls: countCalls.n }
+  );
+
+  // D25：伪造一条「有英文义项但零中文」的残缺缓存，且已过期（超过 TTL）。
+  // 旧代码 dictIsEmpty 判它非空 → 永久命中 → 用户永远看到没中文的卡片。
+  const partialKey = 'dict5|normal|vintage';
+  await sw.evaluate(async (k) => {
+    const D = globalThis.__traceDebug;
+    await D.idbPut('translations', {
+      key: k,
+      dict: {
+        word: 'vintage',
+        phonetic: '',
+        meanings: [{ pos: '形容词', def: 'of high quality', defZh: '', example: '' }],
+        example: '',
+        exampleZh: '',
+        zh: '',
+        senses: [],
+        detail: 'normal',
+        source: 'datamuse',
+      },
+      createdAt: Date.now() - 10 * 60 * 1000,
+    });
+  }, partialKey);
+  const revivedPartial = await sw.evaluate(async (k) => {
+    const D = globalThis.__traceDebug;
+    const d = await D.lookupWord('vintage', {});
+    return { partial: D.dictIsPartial(d), zh: (d && d.zh) || '', key: k };
+  }, partialKey);
+  check(
+    'D25 有英文没中文的残缺缓存过期后会重查并拿到中文',
+    revivedPartial.partial === false && !!revivedPartial.zh,
+    revivedPartial
+  );
+
+  // D26：残缺条目在 TTL 内仍算「新」，不该每次点词都重打网络
+  const partialFresh = await sw.evaluate(async () => {
+    const D = globalThis.__traceDebug;
+    await D.idbPut('translations', {
+      key: 'dict5|normal|brutal',
+      dict: {
+        word: 'brutal',
+        phonetic: '',
+        meanings: [{ pos: '形容词', def: 'savage', defZh: '', example: '' }],
+        example: '',
+        exampleZh: '',
+        zh: '',
+        senses: [],
+        detail: 'normal',
+        source: 'datamuse',
+      },
+      createdAt: Date.now(),
+    });
+    const d = await D.lookupWord('brutal', {});
+    return { partial: D.dictIsPartial(d), zh: (d && d.zh) || '' };
+  });
+  check(
+    'D26 残缺缓存仍在 TTL 内时直接返回（不反复重打网络）',
+    partialFresh.partial === true && !partialFresh.zh,
+    partialFresh
+  );
+
+  // D27：Datamuse 够用时不再苦等 dictionaryapi —— 用 route 让
+  // dictionaryapi 挂住 5s，若实现还有「够用就早收工」的宽限，整体应远小于 5s。
+  await dropKey('dict5|normal|relic');
+  await ctx.route('**api.dictionaryapi.dev/**', async (r) => {
+    await new Promise((res) => setTimeout(res, 5000));
+    r.continue();
+  });
+  const tSlow = await sw.evaluate(async () => {
+    const D = globalThis.__traceDebug;
+    const t0 = Date.now();
+    const d = await D.fetchDict('relic', D.detailPreset('normal'));
+    return { ms: Date.now() - t0, meanings: d.meanings.length, phonetic: !!d.phonetic };
+  });
+  await ctx.unroute('**api.dictionaryapi.dev/**');
+  check(
+    'D27 Datamuse 够用时不等慢的 dictionaryapi（宽限后提前返回）',
+    tSlow.ms < 4000 && tSlow.meanings > 0,
+    tSlow
   );
 
   await page.screenshot({ path: path.join(__dirname, 'shot-dict.png') });
