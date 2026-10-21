@@ -261,6 +261,31 @@ Tier C  逐词直译拼接（永远可用，兜底）
 2. **必须显示字幕原文的中文译文**（"出现语境"块）—— §0.1 那个案例里，用户正是靠「付钱 vs 支付你的公平」的差异才发现问题。把字幕译文摆出来，差异自己会暴露。
 3. **来源标签 + 可编辑** —— 承认不可靠，并给出修正手段。
 
+### 4.1.1 查空时的卡片：空结果不再被永久缓存
+
+这条来自一个真实报障：「为什么这两个单词单独点击没有解释意思，两个一起查才有翻译意思」。截图里单点 `chill` / `secluded`，卡片只有标题 + 「本句译文」+ 收藏按钮，中间**完全空白**，既没有释义也没有任何提示；而把两个词一起拖选，短语卡却有「寒冷僻静」的整体译和逐词对照。
+
+**根因不在渲染，在缓存。** `lookupWord()` 拿到结果后是无条件 `idbPut` 的，包括「词典源全挂」时返回的那个空壳结构（`meanings: []`、`phonetic: ''`、`source: ''`）；而读取侧 `if (cached && cached.dict) return cached.dict` 命中即返回，**既不看新鲜度，也不看空不空**。于是某个词只要在第一次点击时恰好赶上网络/代理抖一下，它就被永久钉成空卡，重装扩展之前都不会恢复。短语路径 `lookupPhrase()` 的 `if (!result.gloss) return null;` 写在 `idbPut` 之前，空结果不落盘 —— 这正是「单词空、短语正常」这个诡异不对称的来源。
+
+复现实验（`tools/probe-poison.js`）：正常加载 → 断掉 Datamuse / dictionaryapi / Google 三个域 → 查 `chill` 得到 `{meanings:0, phonetic:"", source:""}` → 恢复网络 → 再查，**逐字节相同**；手动删缓存键后立刻恢复成 `{phonetic:"CH IH1 L", meanings:6, source:"datamuse"}`。
+
+四处改动：
+
+| 位置 | 改动 | 作用 |
+|---|---|---|
+| `bg.js` `lookupWord()` | 缓存键 `dict3\|` → `dict4\|` | 让历史上被钉死的空卡一次性失效，不用用户手动清缓存 |
+| `bg.js` `lookupWord()` | 新增 `dictIsEmpty()` + `DICT_PARTIAL_TTL = 5 * 60 * 1000`；非 `force` 时，空结果只在 5 分钟内算「新鲜」 | 空结果不再是永久的：短暂网络故障仍走缓存避免连打，过期自动重查 |
+| `bg.js` 消息路由 `case 'dict'` | 透传 `{ force: !!msg.force }` | 给 UI 一个「跳过缓存、直连网络」的入口 |
+| `content.js` 卡片 | 无 senses 且无 `zh` 时渲染 `.trace-pop-miss`（标题 + 一句为什么 + `↻ 重新查询`） | 用户看到的是「没查到，可以重试」而不是一片空白 |
+
+重试按钮走 `data-act="retry"` → `openWordCard(word, rect, true)`，用存下来的 `state.wordPopup.retryRect` 原地重绘，卡片不跳位置。
+
+**顺带修掉一个会让重试直接失效的坑**：document 级「点卡片外面就关闭」的处理器只看 `popupEl.contains(e.target)`，而重查会把卡片 `innerHTML` 整个重建 —— 事件冒泡到 document 时，`e.target`（原来那个按钮）已经脱离文档，`contains` 返回 false，卡片被判成「点了外面」立刻关闭，表现为「点重新查询后卡片消失」。加一句 `if (!e.target.isConnected) return;` 即可。
+
+回归覆盖（`tools/test-dict.js` D19–D23）：D19 断四域时返回空结果、D20 空结果在 TTL 内仍走缓存、D21 把 `createdAt` 改老 6 分钟后自动重查并恢复 6 条释义、D22 `force:true` 直连网络、D23 完整条目照常走缓存。断域时必须**同时**断掉 `translate.googleapis.com` 和 `clients5.google.com` —— 只断前者的话 `dict.zh` 仍会由第三档 plan 填上，`dictIsEmpty` 为 false，测试会假绿。
+
+UI 侧另有一支探针 `tools/probe-miss.js`：断网 → 点词 → 断言 `.trace-pop-miss` 出现且 `.trace-pop-senses li` 为 0 → 恢复网络 → 点重试 → 断言提示块消失、释义恢复到 6 条，产出 `tools/shots/popup-miss.png` 与 `popup-recovered.png`。
+
 ### 4.2 加入生词本按钮
 
 - 短语模式按钮文案改为 `＋ 加入生词本（短语）`，与单词的 `＋ 加入生词本` 区分。

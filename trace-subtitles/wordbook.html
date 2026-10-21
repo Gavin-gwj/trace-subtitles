@@ -1,969 +1,2090 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="light">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>词库看板 · Trace</title>
-  <link rel="stylesheet" href="theme.css" />
-  <style>
-    html,
-    body {
-      height: 100%;
-    }
-    body {
-      display: flex;
-      overflow: hidden;
-      background:
-        radial-gradient(70% 50% at 82% -8%, rgba(255, 215, 110, 0.07), transparent 62%),
-        radial-gradient(50% 40% at 12% 108%, rgba(139, 127, 240, 0.06), transparent 60%),
-        var(--ink-0);
-    }
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Trace 生词本</title>
+<link rel="stylesheet" href="theme.css" />
+<link rel="stylesheet" href="theme-tokens.css" />
+<style>
+/* ============================================================================
+   Trace 生词本 · 词库看板
 
-    /* ============================================================ 侧栏 */
-    aside {
-      width: 216px;
-      flex: none;
-      display: flex;
-      flex-direction: column;
-      padding: 20px 14px 16px;
-      border-right: 1px solid var(--line);
-      background: rgba(11, 11, 16, 0.6);
-      backdrop-filter: blur(20px);
-    }
-    .brand {
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      padding: 0 6px 22px;
-    }
-    .mark {
-      width: 30px;
-      height: 30px;
-      border-radius: 9px;
-      display: grid;
-      place-items: center;
-      background: linear-gradient(140deg, var(--gold) 0%, var(--gold-2) 100%);
-      color: #1a1400;
-      font-family: var(--font-display);
-      font-weight: 800;
-      font-size: 15px;
-      letter-spacing: -0.03em;
-      box-shadow: 0 4px 18px rgba(255, 190, 61, 0.24);
-      flex: none;
-    }
-    .brand-name {
-      font-family: var(--font-display);
-      font-size: 15px;
-      font-weight: 700;
-      letter-spacing: -0.015em;
-      line-height: 1.15;
-    }
-    .brand-sub {
-      font-size: 10.5px;
-      color: var(--text-3);
-      letter-spacing: 0.03em;
-    }
+   主题变量在 theme-tokens.css（与 review.html 共用一份，避免两页漂移）。
+   本文件只写这个页面自己的组件样式。
+   ========================================================================== */
+/* ================================================================ 基础布局 */
 
-    .side-label {
-      font-size: 10px;
-      font-weight: 650;
-      letter-spacing: 0.09em;
-      text-transform: uppercase;
-      color: var(--text-4);
-      padding: 0 8px 7px;
-    }
-    .side-nav {
-      display: flex;
-      flex-direction: column;
-      gap: 2px;
-      margin-bottom: 22px;
-    }
-    .side-nav button {
-      display: flex;
-      align-items: center;
-      gap: 9px;
-      width: 100%;
-      padding: 8px 9px;
-      border: none;
-      border-radius: var(--r-sm);
-      background: transparent;
-      color: var(--text-2);
-      font-family: var(--font-body);
-      font-size: 12.5px;
-      font-weight: 500;
-      text-align: left;
-      cursor: pointer;
-      transition: background 0.16s var(--ease-io), color 0.16s var(--ease-io);
-    }
-    .side-nav button:hover {
-      background: rgba(255, 255, 255, 0.05);
-      color: var(--text-1);
-    }
-    .side-nav button.on {
-      background: var(--gold-soft);
-      color: var(--gold);
-      font-weight: 600;
-    }
-    .side-nav button svg {
-      flex: none;
-      opacity: 0.9;
-    }
-    .side-nav .count {
-      margin-left: auto;
-      font-family: var(--font-mono);
-      font-size: 10px;
-      color: var(--text-4);
-    }
-    .side-nav button.on .count {
-      color: var(--gold);
-      opacity: 0.8;
-    }
+body {
+  background: var(--ink-0);
+  color: var(--text-1);
+  min-height: 100vh;
+}
 
-    .side-foot {
-      margin-top: auto;
-      padding: 0 8px;
-      font-size: 10.5px;
-      line-height: 1.65;
-      color: var(--text-4);
-    }
+.wrap {
+  display: grid;
+  grid-template-columns: 208px minmax(0, 1fr);
+  min-height: 100vh;
+}
 
-    /* ============================================================ 主区 */
-    main {
-      flex: 1 1 auto;
-      min-width: 0;
-      overflow-y: auto;
-      padding: 26px 30px 40px;
-    }
+/* 左侧栏在窄窗口下折叠成顶部一条，见文件末尾的 @media */
+aside {
+  position: sticky;
+  top: 0;
+  align-self: start;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 22px 14px 16px;
+  border-right: 1px solid var(--line);
+  background: var(--ink-1);
+  /* 窗口很矮（< 620px 高）时导航 + 备份块 + 隐私脚注加起来会超过 100vh。
+     宁可让侧栏自己滚，也不能让最后那行「数据只存在本机」被裁掉 ——
+     它是这个产品的信任前提，不该因为窗口矮就消失。 */
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+}
 
-    .top {
-      display: flex;
-      align-items: flex-end;
-      justify-content: space-between;
-      gap: 20px;
-      margin-bottom: 24px;
-      flex-wrap: wrap;
-    }
-    h1 {
-      margin: 0;
-      font-family: var(--font-display);
-      font-size: 26px;
-      font-weight: 750;
-      letter-spacing: -0.035em;
-      line-height: 1.1;
-    }
-    .sub {
-      font-size: 12px;
-      color: var(--text-3);
-      margin-top: 5px;
-    }
-    .top-tools {
-      display: flex;
-      gap: 8px;
-      align-items: center;
-    }
-    .top-tools .input {
-      width: 200px;
-    }
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 0 6px 18px;
+}
+.brand .mark {
+  width: 26px;
+  height: 26px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  border-radius: 9px;
+  background: linear-gradient(140deg, var(--gold) 0%, var(--gold-2) 100%);
+  color: #2a2000;
+  font-family: var(--font-display);
+  font-weight: 800;
+  font-size: 14px;
+  letter-spacing: -0.03em;
+  box-shadow: 0 2px 8px -2px rgba(196, 152, 36, 0.5);
+}
+.brand-name {
+  font-family: var(--font-display);
+  font-size: 14.5px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  line-height: 1.1;
+}
+.brand-sub {
+  font-size: 10.5px;
+  color: var(--text-3);
+  letter-spacing: 0.04em;
+  line-height: 1.3;
+}
 
-    /* KPI 卡片 */
-    .kpis {
-      display: grid;
-      grid-template-columns: repeat(4, 1fr);
-      gap: 12px;
-      margin-bottom: 16px;
-    }
-    .kpi {
-      padding: 14px 16px 13px;
-      overflow: hidden;
-    }
-    .kpi-top {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 8px;
-    }
-    .kpi-lbl {
-      font-size: 11.5px;
-      color: var(--text-3);
-      font-weight: 500;
-    }
-    .kpi-ico {
-      width: 22px;
-      height: 22px;
-      border-radius: 6px;
-      display: grid;
-      place-items: center;
-      flex: none;
-    }
-    .kpi-val {
-      font-family: var(--font-display);
-      font-variant-numeric: tabular-nums;
-      font-size: 30px;
-      font-weight: 720;
-      letter-spacing: -0.045em;
-      line-height: 1;
-      margin-top: 9px;
-    }
-    .kpi-delta {
-      display: flex;
-      align-items: center;
-      gap: 5px;
-      font-size: 11px;
-      color: var(--text-4);
-      margin-top: 7px;
-    }
-    .kpi-delta b {
-      font-family: var(--font-mono);
-      font-weight: 600;
-      font-size: 10.5px;
-    }
-    .up {
-      color: var(--green);
-    }
-    .down {
-      color: var(--danger);
-    }
-    .kpi-spark {
-      width: 100%;
-      height: 26px;
-      margin-top: 6px;
-      display: block;
-      overflow: visible;
-    }
+.side-label {
+  padding: 12px 8px 6px;
+  font-size: 10px;
+  font-weight: 650;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-4);
+}
+/* 第二组标签（本地备份）向上推开，把「视图导航」钉在顶部、
+   把「备份 + 隐私说明」这簇钉在底部。否则中间会留出一段 350px 以上的
+   空洞，看起来像少渲染了一块。 */
+.side-label.push {
+  margin-top: auto;
+}
+.side-label:first-of-type {
+  padding-top: 4px;
+}
 
-    /* 图表区 */
-    .charts {
-      display: grid;
-      grid-template-columns: minmax(0, 1.62fr) minmax(0, 1fr);
-      gap: 12px;
-      margin-bottom: 16px;
-    }
-    /* 两栏等高：右栏内容少时拉伸铺满，避免「学习状态」卡下半截空一大块 */
-    .charts > .card {
-      display: flex;
-      flex-direction: column;
-    }
-    .card-hd {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 12px;
-      padding: 15px 17px 0;
-    }
-    .card-title {
-      font-family: var(--font-display);
-      font-size: 13.5px;
-      font-weight: 680;
-      letter-spacing: -0.01em;
-    }
-    .card-sub {
-      font-size: 11px;
-      color: var(--text-4);
-      margin-top: 2px;
-    }
+#sideNav {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+#sideNav button {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 7px 9px;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--text-2);
+  font-family: var(--font-body);
+  font-size: 12.5px;
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.15s var(--ease-io), color 0.15s var(--ease-io);
+}
+#sideNav button svg {
+  flex: none;
+  opacity: 0.62;
+  transition: opacity 0.15s var(--ease-io);
+}
+#sideNav button:hover {
+  background: var(--ink-4);
+  color: var(--text-1);
+}
+#sideNav button.on {
+  background: var(--gold-soft);
+  border-color: var(--gold-line);
+  color: var(--text-1);
+  font-weight: 600;
+}
+#sideNav button.on svg {
+  opacity: 1;
+  color: var(--brand-ink);
+}
+#sideNav .count {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+#sideNav button.on .count {
+  color: var(--brand-ink);
+}
 
-    /* 柱状图 */
-    .chart-wrap {
-      padding: 16px 17px 14px;
-    }
-    .bars {
-      display: flex;
-      align-items: flex-end;
-      gap: 3px;
-      height: 168px;
-      /* 左右留一点，最后一根柱子不要贴到卡片边缘 */
-      padding: 0 6px 22px;
-      position: relative;
-      border-bottom: 1px solid var(--line);
-    }
-    .grid-line {
-      position: absolute;
-      left: 0;
-      right: 0;
-      height: 1px;
-      background: var(--line);
-      pointer-events: none;
-    }
-    .grid-line span {
-      position: absolute;
-      left: 0;
-      top: -7px;
-      font-family: var(--font-mono);
-      font-size: 9px;
-      color: var(--text-4);
-      background: var(--ink-2);
-      padding-right: 4px;
-    }
-    /* 顶部那条参考线的标签放线下方，否则会被容器裁掉 */
-    .grid-line.grid-top span {
-      top: 2px;
-    }
-    .bar {
-      flex: 1 1 0;
-      min-width: 0;
-      display: flex;
-      flex-direction: column;
-      justify-content: flex-end;
-      align-items: center;
-      height: 100%;
-      position: relative;
-      cursor: default;
-      z-index: 1;
-    }
-    .bar-fill {
-      width: 100%;
-      max-width: 34px;
-      border-radius: 3px 3px 0 0;
-      background: linear-gradient(180deg, var(--gold) 0%, rgba(255, 190, 61, 0.42) 100%);
-      transition: filter 0.16s var(--ease-io), transform 0.16s var(--ease);
-      transform-origin: bottom;
-      animation: barIn 0.5s var(--ease) both;
-      animation-delay: calc(var(--i, 0) * 14ms);
-      min-height: 2px;
-    }
-    .bar:hover .bar-fill {
-      filter: brightness(1.22);
-    }
-    .bar-empty .bar-fill {
-      background: var(--ink-4);
-    }
-    @keyframes barIn {
-      from {
-        transform: scaleY(0);
-        opacity: 0.2;
-      }
-      to {
-        transform: scaleY(1);
-        opacity: 1;
-      }
-    }
-    .bar-x {
-      position: absolute;
-      bottom: -19px;
-      font-family: var(--font-mono);
-      font-size: 9px;
-      color: var(--text-4);
-      white-space: nowrap;
-      transform: translateX(-50%);
-      left: 50%;
-    }
-    .bar-tip {
-      position: absolute;
-      bottom: calc(100% + 6px);
-      left: 50%;
-      transform: translateX(-50%) translateY(3px);
-      padding: 4px 7px;
-      border-radius: 5px;
-      background: #26262f;
-      border: 1px solid var(--line-2);
-      color: var(--text-1);
-      font-size: 10.5px;
-      white-space: nowrap;
-      opacity: 0;
-      pointer-events: none;
-      transition: opacity 0.14s, transform 0.14s var(--ease);
-      z-index: 5;
-      box-shadow: 0 6px 18px rgba(0, 0, 0, 0.5);
-    }
-    .bar:hover .bar-tip {
-      opacity: 1;
-      transform: translateX(-50%) translateY(0);
-    }
-    .bar-tip b {
-      color: var(--gold);
-      font-family: var(--font-mono);
-    }
+/* 复习台入口：金色实感按钮，与上面一排「筛选」在视觉上就该不同类。
+   筛选是导航（选中态是金色软底），复习是动作（本身就是金色软底）。 */
+.side-review {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  margin-top: 8px;
+  padding: 8px 9px;
+  border: 1px solid var(--gold-line);
+  border-radius: 9px;
+  background: var(--gold-soft);
+  color: var(--brand-ink);
+  font-family: var(--font-body);
+  font-size: 12.5px;
+  font-weight: 650;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.15s var(--ease-io), border-color 0.15s var(--ease-io);
+}
+.side-review:hover {
+  background: color-mix(in srgb, var(--gold) 38%, transparent);
+  border-color: var(--gold-2);
+}
+.side-review:active {
+  transform: scale(0.985);
+}
+.side-review svg {
+  flex: none;
+  opacity: 0.9;
+}
+.side-review .count {
+  margin-left: auto;
+  padding: 0 5px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--gold) 52%, transparent);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+html[data-theme="dark"] .side-review .count {
+  /* 同 .tool-batch .soon：深色下品牌墨色是亮金，金底上必须反成深墨。 */
+  background: rgba(255, 215, 110, 0.72);
+  color: #2a2000;
+}
 
-    /* 状态环 */
-    .donut-wrap {
-      padding: 10px 17px 16px;
-      display: flex;
-      align-items: center;
-      gap: 18px;
-      /* 撑满卡片剩余高度，让环形图在图卡里垂直居中，而不是挤在上半截 */
-      flex: 1;
-      justify-content: center;
-    }
-    .donut {
-      width: 104px;
-      height: 104px;
-      border-radius: 50%;
-      flex: none;
-      position: relative;
-      display: grid;
-      place-items: center;
-    }
-    .donut::after {
-      content: "";
-      position: absolute;
-      inset: 13px;
-      border-radius: 50%;
-      background: var(--ink-2);
-      box-shadow: 0 0 0 1px var(--line);
-    }
-    .donut-center {
-      position: relative;
-      z-index: 1;
-      text-align: center;
-    }
-    .donut-num {
-      font-family: var(--font-display);
-      font-variant-numeric: tabular-nums;
-      font-size: 21px;
-      font-weight: 730;
-      letter-spacing: -0.04em;
-      line-height: 1;
-    }
-    .donut-lbl {
-      font-size: 9.5px;
-      color: var(--text-4);
-      margin-top: 2px;
-    }
-    .legend {
-      flex: 1;
-      min-width: 0;
-      display: flex;
-      flex-direction: column;
-      gap: 9px;
-    }
-    .lg {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      font-size: 11.5px;
-      cursor: pointer;
-      border-radius: 5px;
-      padding: 1px 3px;
-      margin: -1px -3px;
-      transition: background 0.14s;
-    }
-    .lg:hover {
-      background: rgba(255, 255, 255, 0.05);
-    }
-    .lg-dot {
-      width: 7px;
-      height: 7px;
-      border-radius: 2px;
-      flex: none;
-    }
-    .lg-name {
-      color: var(--text-2);
-    }
-    .lg-val {
-      margin-left: auto;
-      font-family: var(--font-mono);
-      font-size: 11px;
-      color: var(--text-1);
-      font-variant-numeric: tabular-nums;
-    }
-    .lg-pct {
-      font-family: var(--font-mono);
-      font-size: 10px;
-      color: var(--text-4);
-      width: 34px;
-      text-align: right;
-    }
+/* 侧栏的备份区：保留原有全部能力（选目录/自动备份/文件名说明） */
+.side-backup {
+  margin-top: 10px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--ink-2);
+}
+.bk-dir {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  padding: 6px 8px;
+  border: 1px dashed var(--line-2);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-2);
+  font-family: var(--font-body);
+  font-size: 11.5px;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 0.15s var(--ease-io), color 0.15s var(--ease-io);
+}
+.bk-dir:hover {
+  border-color: var(--gold-line);
+  color: var(--text-1);
+}
+.bk-dir.set {
+  border-style: solid;
+  border-color: var(--gold-line);
+  color: var(--text-1);
+}
+.bk-dir span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.bk-hint {
+  margin: 6px 2px 0;
+  font-size: 10.5px;
+  line-height: 1.45;
+  color: var(--text-3);
+}
+.bk-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 8px;
+  font-size: 11.5px;
+  color: var(--text-2);
+  cursor: pointer;
+}
+.side-foot {
+  /* 不再自己 margin-top:auto —— 让位给 .side-label.push 一次性推开，
+     两处都 auto 会把空白一分为二、把备份块吊在半空。 */
+  margin-top: 4px;
+  padding: 12px 6px 0;
+  font-size: 10.5px;
+  line-height: 1.6;
+  color: var(--text-3);
+  border-top: 1px solid var(--line);
+}
+.side-foot code {
+  display: inline-block;
+  margin-top: 3px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  line-height: 1.5;
+  color: var(--text-2);
+  background: var(--ink-4);
+  border-radius: 4px;
+  padding: 1px 4px;
+  word-break: break-all;
+}
 
-    /* 词表 */
-    .list-card {
-      overflow: hidden;
-    }
-    .list-tools {
-      display: flex;
-      align-items: center;
-      gap: 7px;
-      padding: 12px 17px;
-      flex-wrap: wrap;
-      border-bottom: 1px solid var(--line);
-    }
-    .list-tools .input {
-      width: 190px;
-      margin-left: auto;
-    }
-    .rows {
-      display: flex;
-      flex-direction: column;
-    }
-    .row-head,
-    .wrow {
-      display: grid;
-      grid-template-columns: 28px minmax(120px, 1.05fr) minmax(90px, 0.9fr) minmax(0, 2.1fr) 92px 62px;
-      align-items: center;
-      gap: 12px;
-      padding: 0 17px;
-    }
-    .row-head {
-      height: 34px;
-      font-size: 10px;
-      font-weight: 650;
-      letter-spacing: 0.07em;
-      text-transform: uppercase;
-      color: var(--text-4);
-      border-bottom: 1px solid var(--line);
-      position: sticky;
-      top: 0;
-      background: var(--ink-2);
-      z-index: 2;
-    }
-    .wrow {
-      min-height: 54px;
-      border-bottom: 1px solid var(--line);
-      cursor: pointer;
-      transition: background 0.14s var(--ease-io);
-      animation: rise 0.3s var(--ease) both;
-      animation-delay: calc(var(--i, 0) * 16ms);
-    }
-    .wrow:last-child {
-      border-bottom: none;
-    }
-    .wrow:hover {
-      background: rgba(255, 255, 255, 0.035);
-    }
-    .wrow.sel {
-      background: var(--gold-soft);
-    }
-    .w-ico {
-      width: 24px;
-      height: 24px;
-      border-radius: 7px;
-      display: grid;
-      place-items: center;
-      font-family: var(--font-display);
-      font-weight: 750;
-      font-size: 11px;
-      text-transform: uppercase;
-      color: var(--gold);
-      background: var(--gold-soft);
-      border: 1px solid rgba(255, 215, 110, 0.18);
-    }
-    /* 短语徽标：用引号代替首字母，一眼就能和单词行区分 */
-    .w-ico-phrase {
-      font-size: 12px;
-      text-transform: none;
-      color: var(--violet);
-      background: rgba(139, 127, 240, 0.13);
-      border-color: rgba(139, 127, 240, 0.28);
-    }
-    .wrow-phrase .w-txt {
-      font-style: normal;
-      letter-spacing: 0;
-    }
-    .w-word {
-      font-family: var(--font-display);
-      font-size: 13px;
-      font-weight: 650;
-      letter-spacing: -0.01em;
-      display: flex;
-      align-items: center;
-      gap: 7px;
-      min-width: 0;
-    }
-    .w-word .w-txt {
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
-    .w-word .pill {
-      flex: none;
-    }
-    .w-phon {
-      font-family: var(--font-mono);
-      font-size: 10px;
-      color: var(--text-4);
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
-    .w-zh {
-      font-size: 11.5px;
-      color: var(--text-2);
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
-    .w-ctx {
-      font-size: 11px;
-      color: var(--text-4);
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-      font-style: italic;
-    }
-    .w-date {
-      font-family: var(--font-mono);
-      font-size: 10.5px;
-      color: var(--text-3);
-      text-align: right;
-      white-space: nowrap;
-    }
-    .w-act {
-      display: flex;
-      gap: 3px;
-      justify-content: flex-end;
-      /* 平时半透明可见（否则用户不知道这里有操作），悬停整行才完全实心 */
-      opacity: 0.42;
-      transition: opacity 0.14s;
-    }
-    .wrow:hover .w-act {
-      opacity: 1;
-    }
-    .w-act button {
-      width: 24px;
-      height: 24px;
-      display: grid;
-      place-items: center;
-      border: 1px solid var(--line);
-      border-radius: 6px;
-      background: var(--ink-3);
-      color: var(--text-3);
-      cursor: pointer;
-      transition: all 0.14s;
-      padding: 0;
-    }
-    .w-act button:hover {
-      color: var(--text-1);
-      border-color: var(--line-3);
-    }
-    .w-act .act-del:hover {
-      color: var(--danger);
-      border-color: rgba(242, 85, 90, 0.4);
-      background: var(--danger-soft);
-    }
-    .w-act .act-rev:hover {
-      color: var(--green);
-      border-color: rgba(70, 211, 154, 0.4);
-      background: var(--green-soft);
-    }
+/* ================================================================ 主区 */
 
-    /* 详情抽屉 */
-    .drawer {
-      position: fixed;
-      top: 0;
-      right: 0;
-      bottom: 0;
-      width: 372px;
-      background: rgba(16, 16, 23, 0.98);
-      backdrop-filter: blur(24px);
-      border-left: 1px solid var(--line-2);
-      box-shadow: -20px 0 60px rgba(0, 0, 0, 0.6);
-      transform: translateX(100%);
-      transition: transform 0.34s var(--ease);
-      z-index: 40;
-      display: flex;
-      flex-direction: column;
-    }
-    .drawer.open {
-      transform: none;
-    }
-    .dw-hd {
-      display: flex;
-      align-items: flex-start;
-      gap: 10px;
-      padding: 20px 20px 16px;
-      border-bottom: 1px solid var(--line);
-      flex: none;
-    }
-    .dw-word {
-      font-family: var(--font-display);
-      font-size: 25px;
-      font-weight: 740;
-      letter-spacing: -0.035em;
-      line-height: 1.1;
-      word-break: break-word;
-    }
-    .dw-phon {
-      font-family: var(--font-mono);
-      font-size: 11.5px;
-      color: var(--text-3);
-      margin-top: 4px;
-    }
-    .dw-body {
-      padding: 16px 20px 24px;
-      overflow-y: auto;
-      flex: 1;
-    }
-    .dw-sec {
-      margin-bottom: 18px;
-    }
-    .dw-sec-hd {
-      font-size: 10px;
-      font-weight: 650;
-      letter-spacing: 0.08em;
-      text-transform: uppercase;
-      color: var(--text-4);
-      margin-bottom: 8px;
-    }
-    .dw-zh {
-      font-size: 15px;
-      color: var(--gold);
-      font-weight: 600;
-      line-height: 1.5;
-    }
-    .dw-quote {
-      padding: 11px 13px;
-      border-radius: var(--r-md);
-      background: var(--ink-3);
-      border: 1px solid var(--line);
-      font-size: 12.5px;
-      line-height: 1.62;
-      color: var(--text-2);
-    }
-    .dw-quote em {
-      color: var(--text-1);
-      font-style: normal;
-      background: var(--gold-soft);
-      border-radius: 3px;
-      padding: 0 2px;
-    }
-    .dw-quote .q-zh {
-      color: var(--text-3);
-      margin-top: 5px;
-      font-size: 11.5px;
-    }
-    /* 短语抽屉：逐词对照表 + 逐词直译 + 说明 */
-    .dw-words {
-      display: flex;
-      flex-direction: column;
-      gap: 2px;
-    }
-    .dw-wrow {
-      display: flex;
-      gap: 10px;
-      align-items: baseline;
-      font-size: 12px;
-      line-height: 1.6;
-    }
-    .dw-wrow b {
-      flex: none;
-      min-width: 78px;
-      color: var(--text-3);
-      font-weight: 600;
-    }
-    .dw-wrow span {
-      color: var(--text-1);
-    }
-    .dw-literal {
-      margin-top: 6px;
-      font-size: 11.5px;
-      color: var(--text-3);
-    }
-    .dw-note {
-      margin-top: 7px;
-      padding: 6px 9px;
-      border-radius: var(--r-sm);
-      background: rgba(245, 166, 35, 0.1);
-      border-left: 2px solid var(--amber);
-      font-size: 11.5px;
-      line-height: 1.55;
-      color: #e8c98a;
-    }
-    .dw-meta {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 8px;
-    }
-    .dw-meta > div {
-      padding: 9px 11px;
-      border-radius: var(--r-sm);
-      background: var(--ink-3);
-      border: 1px solid var(--line);
-    }
-    .dw-meta .m-lbl {
-      font-size: 10px;
-      color: var(--text-4);
-    }
-    .dw-meta .m-val {
-      font-family: var(--font-mono);
-      font-size: 12px;
-      color: var(--text-1);
-      margin-top: 2px;
-    }
-    .dw-foot {
-      display: flex;
-      gap: 8px;
-      padding: 14px 20px;
-      border-top: 1px solid var(--line);
-      flex: none;
-    }
-    .dw-foot .btn {
-      flex: 1;
-    }
+main {
+  min-width: 0;
+  padding: 26px 30px 60px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
 
-    .scrim {
-      position: fixed;
-      inset: 0;
-      background: rgba(0, 0, 0, 0.42);
-      opacity: 0;
-      pointer-events: none;
-      transition: opacity 0.3s var(--ease-io);
-      z-index: 30;
-    }
-    .scrim.on {
-      opacity: 1;
-      pointer-events: auto;
-    }
+/* ---------------------------------------------------------------- 页头 */
+.top {
+  display: flex;
+  align-items: flex-start;
+  gap: 20px;
+  flex-wrap: wrap;
+  padding-bottom: 2px;
+}
+.top-title {
+  min-width: 0;
+  flex: 1 1 320px;
+}
+h1 {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 25px;
+  font-weight: 700;
+  letter-spacing: -0.028em;
+  line-height: 1.15;
+  color: var(--text-1);
+}
+h1 .accent {
+  color: var(--brand-ink);
+}
+.sub {
+  margin: 5px 0 0;
+  font-size: 12px;
+  color: var(--text-3);
+  line-height: 1.5;
+}
+.top-tools {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
 
-    /* 空状态 */
-    .big-empty {
-      padding: 64px 20px;
-    }
+/* 顶栏图标按钮：SVG + 语义化的图标语义靠 title/aria-label 说明 */
+.tool {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 34px;
+  padding: 0 12px;
+  border: 1px solid var(--line-2);
+  border-radius: 10px;
+  background: var(--ink-2);
+  color: var(--text-2);
+  font-family: var(--font-body);
+  font-size: 12px;
+  font-weight: 550;
+  cursor: pointer;
+  white-space: nowrap;
+  box-shadow: var(--shadow-sm);
+  transition: background 0.16s var(--ease-io), border-color 0.16s var(--ease-io),
+    color 0.16s var(--ease-io), transform 0.16s var(--ease);
+}
+.tool:hover {
+  color: var(--text-1);
+  border-color: var(--line-3);
+  background: var(--ink-1);
+}
+.tool:active {
+  transform: scale(0.975);
+}
+.tool svg {
+  flex: none;
+}
+.tool-key {
+  border-color: var(--gold-line);
+  background: var(--gold-soft);
+  color: var(--brand-ink);
+  font-weight: 650;
+}
+.tool-key:hover {
+  background: var(--gold-soft);
+  border-color: var(--gold-line);
+  color: var(--brand-ink);
+}
+/* 主题按钮做成「图标 + 当前模式」的胶囊，切换时图标交叉淡入 */
+.theme-btn {
+  position: relative;
+  overflow: hidden;
+}
+.theme-ico {
+  position: relative;
+  width: 16px;
+  height: 16px;
+  flex: none;
+}
+.theme-ico svg {
+  position: absolute;
+  inset: 0;
+  transition: opacity 0.22s var(--ease-io), transform 0.32s var(--ease);
+}
+html[data-theme="light"] .theme-ico .i-sun {
+  opacity: 0;
+  transform: rotate(-40deg) scale(0.7);
+}
+html[data-theme="dark"] .theme-ico .i-moon {
+  opacity: 0;
+  transform: rotate(40deg) scale(0.7);
+}
 
-    @media (max-width: 1080px) {
-      .charts {
-        grid-template-columns: 1fr;
-      }
-      .kpis {
-        grid-template-columns: repeat(2, 1fr);
-      }
-    }
-    @media (max-width: 760px) {
-      aside {
-        display: none;
-      }
-      main {
-        padding: 20px 16px 32px;
-      }
-      .row-head,
-      .wrow {
-        grid-template-columns: 26px minmax(0, 1fr) 70px 56px;
-      }
-      .row-head > :nth-child(3),
-      .wrow > .w-phon,
-      .wrow > .w-ctx {
-        display: none;
-      }
-      .drawer {
-        width: 100%;
-      }
-    }
+/* ---------------------------------------------------------------- KPI */
+#kpis {
+  /* 五张卡必须同宽、同行。之前试过 flex 自动折行，结果是任意宽度下都会
+     出现「4 张 + 孤零零 1 张」，第二行右侧留一整格空白 —— 比挤一点更难看。
+     这里用等宽 grid，只在 720px 以下明确改成 2 列，并让最后一张横跨两列
+     （见文件末尾的媒体查询），从此不会出现落单的卡。 */
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 10px;
+}
+.kpi {
+  min-width: 0;
+  padding: 12px 13px 10px;
+  border-radius: var(--r-md);
+  background: var(--ink-2);
+  border: 1px solid var(--line);
+  box-shadow: var(--shadow-card);
+  overflow: hidden;
+  position: relative;
+}
+.kpi-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.kpi-lbl {
+  font-size: 11px;
+  font-weight: 550;
+  color: var(--text-3);
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+}
+.kpi-ico {
+  width: 22px;
+  height: 22px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  border-radius: 7px;
+}
+.kpi-val {
+  margin-top: 7px;
+  /* 24px 而不是 25px：配合下面 11px 的副标题行，比例从 1:2.4 收到 1:2.2，
+     数字仍然是主角，但不至于把副标题压成脚注。 */
+  font-size: 24px;
+  font-weight: 700;
+  line-height: 1.05;
+  letter-spacing: -0.035em;
+  color: var(--text-1);
+}
+.kpi-val .sm {
+  font-size: 18px;
+  letter-spacing: -0.02em;
+}
+/* 遗忘率是负向指标：数字本身带语义色，比只给图标上色更能一眼读出好坏。
+   0 次忘记时不加这个类，保持中性，避免「没忘记」也被标红。 */
+.kpi-val.neg {
+  color: var(--red);
+}
+.kpi-delta {
+  margin-top: 3px;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--text-3);
+  min-height: 16px;
+  /* 允许折行而不是省略号。窄窗口下「已记住 4 · 掌握率 27%」这种副标题
+     一旦被截成「已记住 4 · 掌握…」，这行字就失去了信息价值；两行放得下。 */
+  overflow: hidden;
+}
+.kpi-delta b {
+  font-weight: 650;
+  color: var(--text-1);
+  font-variant-numeric: tabular-nums;
+}
+.kpi-delta .up {
+  color: var(--green);
+}
+.kpi-delta .warn {
+  color: var(--amber);
+}
+.kpi-delta .hot {
+  color: var(--red);
+}
+.kpi-spark {
+  display: block;
+  width: 100%;
+  height: 22px;
+  margin-top: 6px;
+  overflow: visible;
+}
+/* 迷你走势线在深色卡上是「亮色线条压在近黑底」，同一条 --gold / --st-* 在
+   深底上的相对亮度远高于浅色卡里的白底，会先于大数字抢走视线。整条线降一档
+   不透明度让它退回辅助层——不去改色值，否则五张卡的颜色语义（金=累计、
+   紫=本周、红=忘记、绿=记住）就散了。 */
+html[data-theme="dark"] .kpi-spark {
+  opacity: 0.82;
+}
 
-    /* 侧栏备份区 */
-    .side-backup {
-      padding: 2px 12px 10px;
-      display: flex;
-      flex-direction: column;
-      gap: 7px;
-    }
-    .bk-dir {
-      display: flex;
-      align-items: center;
-      gap: 7px;
-      width: 100%;
-      padding: 7px 10px;
-      border-radius: var(--r-sm);
-      border: 1px dashed var(--line-2);
-      background: transparent;
-      color: var(--text-2);
-      font: 500 11.5px/1.4 var(--font-body);
-      cursor: pointer;
-      text-align: left;
-      transition: border-color 0.15s var(--ease-io), color 0.15s var(--ease-io),
-        background 0.15s var(--ease-io);
-    }
-    .bk-dir:hover {
-      border-color: var(--gold-line);
-      color: var(--text-1);
-      background: var(--gold-soft);
-    }
-    .bk-dir.set {
-      border-style: solid;
-      border-color: var(--line-3);
-      color: var(--text-1);
-    }
-    .bk-dir svg {
-      flex: none;
-      opacity: 0.85;
-    }
-    .bk-dir span {
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
-    .bk-row {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 8px;
-      font: 500 12px/1.4 var(--font-body);
-      color: var(--text-2);
-      cursor: pointer;
-      padding: 2px 0;
-    }
-    .bk-hint {
-      font: 400 10.5px/1.45 var(--font-body);
-      color: var(--text-3);
-    }
+/* 待复习卡片：有积压时描边轻微提亮，是「该复习了」的唯一强提示 */
+.kpi.due {
+  border-color: var(--gold-line);
+}
+.kpi.due .kpi-ico {
+  background: var(--gold-soft) !important;
+  color: var(--brand-ink) !important;
+}
 
-    /* 轻提示：备份 / 恢复的结果反馈 */
-    #wb-toast {
-      position: fixed;
-      left: 50%;
-      bottom: 28px;
-      transform: translate(-50%, 14px);
-      z-index: 90;
-      max-width: min(560px, calc(100vw - 48px));
-      padding: 11px 18px;
-      border-radius: var(--r-md);
-      background: var(--ink-3);
-      border: 1px solid var(--line-2);
-      box-shadow: 0 14px 40px rgba(0, 0, 0, 0.55);
-      color: var(--text-1);
-      font: 500 12.5px/1.5 var(--font-body);
-      opacity: 0;
-      pointer-events: none;
-      transition: opacity 0.18s var(--ease), transform 0.18s var(--ease);
-    }
-    #wb-toast.on {
-      opacity: 1;
-      transform: translate(-50%, 0);
-    }
-    #wb-toast[data-kind='err'] {
-      border-color: rgba(242, 85, 90, 0.42);
-      color: #ffb4b6;
-    }
-  </style>
+/* ---------------------------------------------------------------- 图表 */
+.charts {
+  display: grid;
+  grid-template-columns: minmax(0, 1.62fr) minmax(0, 1fr);
+  gap: 12px;
+}
+.card {
+  background: var(--ink-2);
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow-card);
+}
+/* theme.css 给 .card 加了一道内高光，浅色下会显脏，这里关掉 */
+.card::before {
+  display: none;
+}
+.chart-card {
+  padding: 14px 16px 12px;
+  display: flex;
+  flex-direction: column;
+}
+/* 两张图表卡等高（同一行 grid 自动拉伸），但右边环形卡的内容比左边柱图卡矮，
+   顶对齐时卡底会空出一条，两卡的视觉底边看起来不齐。让内容块吃掉剩余高度并
+   垂直居中，环形与图例就落在卡片正中，读完左边再看右边不会觉得右边「没画满」。 */
+.chart-card > .donut-wrap {
+  flex: 1 1 auto;
+  align-items: center;
+}
+.card-hd {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 6px;
+}
+.card-title {
+  font-size: 12.5px;
+  font-weight: 650;
+  color: var(--text-1);
+  letter-spacing: -0.005em;
+}
+.card-sub {
+  font-size: 11px;
+  color: var(--text-3);
+}
+.seg {
+  margin-left: auto;
+  background: var(--ink-4);
+  border-color: transparent;
+}
+html[data-theme="dark"] .seg {
+  background: var(--ink-2);
+  border-color: var(--line);
+}
+.seg button {
+  font-size: 11.5px;
+  padding: 5px 0;
+}
+.seg button.on::after {
+  background: var(--ink-2);
+  box-shadow: var(--shadow-sm);
+}
+html[data-theme="dark"] .seg button.on::after {
+  background: var(--ink-4);
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.06) inset, 0 2px 8px rgba(0, 0, 0, 0.4);
+}
+
+.chart-wrap {
+  position: relative;
+  margin-top: 10px;
+  /* 左侧留出轴刻度用的窄槽：刻度写在绘图区外面，柱子上就不会压字 */
+  padding-left: 26px;
+  /* 兜底：即便浮层仍有一两个像素越界，也只裁横向、不建滚动容器，
+     不会把整页顶出横向滚动条（纵向浮层照旧可见）。 */
+  overflow-x: clip;
+}
+.chart-grid {
+  position: absolute;
+  /* 与 .bars 的绘图区严格对齐：左边 26px 轴槽 + 7px 内缩，右边 7px 内缩。
+     网格线如果横跨整个容器，就会比柱子两端各多出一截，看着像没对齐。 */
+  inset: 0 7px 18px 33px;
+  pointer-events: none;
+}
+.grid-line {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 1px;
+  /* 用 --line-2 而不是 --line：浅色主题下 .07 透明度的线在白底上几乎
+     看不见，刻度数字就成了悬空的孤立文本，读不出「几」。 */
+  background: var(--line-2);
+}
+/* 顶部那条既是刻度也是图表上边框，比中间的网格线略实一点 */
+.grid-line.top {
+  background: var(--line-3);
+}
+/* 基线（y=0）：柱子需要一个落脚点，否则一排柱脚像浮在半空 */
+.chart-grid::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 1px;
+  background: var(--line-3);
+}
+/* 刻度值贴在基线左端、整体推到绘图区外的窄槽里，并给 1px 线留出一点间隙 */
+.grid-y {
+  position: absolute;
+  right: calc(100% + 5px);
+  top: 50%;
+  transform: translateY(-50%);
+  font-family: var(--font-mono);
+  /* 9px 是这套界面里唯一还会落到 9 的字号，而它是纵轴的读法依据。
+     10px + tabular-nums 在 26px 轴槽里仍放得下，可读性明显好一档。 */
+  font-size: 10px;
+  line-height: 1;
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* 柱状图 */
+.bars {
+  position: relative;
+  display: flex;
+  align-items: flex-end;
+  gap: 3px;
+  height: 128px;
+  /* 左右各留 7px：日期标签是以柱子中心对齐的，首尾两根柱子的标签会
+     比柱体本身宽出去半个字宽。不留这点余量时，最右侧的「10/19」就贴着
+     卡片内边缘，看起来像被裁掉了。 */
+  padding: 0 7px 18px;
+}
+.bar {
+  position: relative;
+  flex: 1 1 0;
+  min-width: 0;
+  display: flex;
+  align-items: flex-end;
+  height: 100%;
+  cursor: default;
+}
+.bar-fill {
+  width: 100%;
+  border-radius: 4px 4px 2px 2px;
+  background: linear-gradient(180deg, var(--gold) 0%, var(--gold-2) 100%);
+  opacity: 0.9;
+  transform-origin: bottom;
+  transition: opacity 0.16s var(--ease-io), transform 0.2s var(--ease);
+}
+html[data-theme="light"] .bar-fill {
+  background: linear-gradient(180deg, #ffdc85 0%, #f3c14e 100%);
+}
+.bar:hover .bar-fill {
+  opacity: 1;
+  transform: scaleX(1.14);
+}
+.bar-empty .bar-fill {
+  background: var(--line-2) !important;
+  opacity: 1;
+}
+.bar-x {
+  position: absolute;
+  /* 标签落在 .bars 的 18px 下内边距带里，而不是柱子轨道内部。
+     原来 bottom:0 时标签压住轨道最底 14px，只要某天的柱子顶到刻度上限
+     （fill 满高 110px）就会把日期盖住 —— 平时数据不满时看不出来，
+     一旦某天新增量等于最大值就露馅。 */
+  bottom: -18px;
+  left: 50%;
+  transform: translateX(-50%);
+  font-family: var(--font-mono);
+  /* 与纵轴刻度同为 10px：这两组数字是同一个坐标系的两条轴，字号不一致时
+     读者会以为日期是另一种性质的元信息。标签只每 7 天出现一次，10px 在
+     单根柱子 20px 的宽度上仍不会互相压到。 */
+  font-size: 10px;
+  color: var(--text-4);
+  white-space: nowrap;
+  pointer-events: none;
+}
+.bar-tip {
+  position: absolute;
+  bottom: calc(100% + 5px);
+  left: 50%;
+  transform: translateX(-50%) translateY(3px);
+  padding: 4px 7px;
+  border-radius: 7px;
+  background: var(--text-1);
+  color: var(--ink-2);
+  font-size: 10.5px;
+  font-weight: 600;
+  white-space: nowrap;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.14s var(--ease-io), transform 0.14s var(--ease);
+  box-shadow: var(--shadow-pop);
+  z-index: 3;
+}
+.bar:hover .bar-tip {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
+}
+/* 首尾两根柱子的浮层改成贴边对齐：居中的提示框有 90px 宽，而末柱中心
+   距离绘图区右沿只有 9px，会顶出卡片被裁掉。贴边后始终完整可见。 */
+.bar:first-child .bar-tip {
+  left: 0;
+  transform: translateY(3px);
+}
+.bar:first-child:hover .bar-tip {
+  transform: translateY(0);
+}
+.bar:last-child .bar-tip {
+  left: auto;
+  right: 0;
+  transform: translateY(3px);
+}
+.bar:last-child:hover .bar-tip {
+  transform: translateY(0);
+}
+
+/* 环形图 */
+.donut-wrap {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 18px;
+  padding: 4px 2px 2px;
+}
+.donut {
+  position: relative;
+  width: 132px;
+  height: 132px;
+  flex: none;
+  border-radius: 50%;
+  background: conic-gradient(var(--ink-4) 0 100%);
+  transition: background 0.4s var(--ease-io);
+}
+/* 环内用一层同底色圆挖空，得到干净的甜甜圈 */
+.donut::after {
+  content: "";
+  position: absolute;
+  /* 环宽 = inset 值。132px 的环上 13px（约占半径 20%）比 15px 更轻，
+     也给环心数字腾出更宽的呼吸区。改这个值等于改环宽，别当成内边距。 */
+  inset: 13px;
+  border-radius: 50%;
+  background: var(--ink-2);
+}
+.donut-center {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  display: grid;
+  place-content: center;
+  text-align: center;
+  pointer-events: none;
+}
+.donut-num {
+  font-size: 24px;
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: -0.04em;
+  color: var(--text-1);
+}
+.donut-lbl {
+  margin-top: 3px;
+  font-size: 9.5px;
+  color: var(--text-3);
+  letter-spacing: 0.03em;
+}
+.legend {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  /* 图例不铺满剩余宽度：铺满时「已记住」与右侧数字之间会被拉出 150px 的空洞，
+     整组内容被推到卡片左半边。给一个内容量级的固定宽度，让数值列仍然上下对齐，
+     剩下的留白交给 .donut-wrap 的 justify-content:center 均分到两侧。 */
+  flex: 0 1 136px;
+  min-width: 118px;
+}
+.lg {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 7px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background 0.14s var(--ease-io), border-color 0.14s var(--ease-io);
+}
+.lg:hover {
+  background: var(--ink-4);
+}
+.lg.on {
+  background: var(--ink-4);
+  border-color: var(--line-2);
+}
+.lg-dot {
+  width: 7px;
+  height: 7px;
+  flex: none;
+  border-radius: 2px;
+}
+.lg-name {
+  font-size: 11.5px;
+  color: var(--text-2);
+  white-space: nowrap;
+}
+.lg-val {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--text-1);
+  font-variant-numeric: tabular-nums;
+}
+.lg-pct {
+  width: 34px;
+  text-align: right;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------------------------------------------------------------- 列表卡片 */
+.list-card {
+  padding: 0;
+  overflow: hidden;
+}
+.list-tools {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--line);
+}
+.search-box {
+  position: relative;
+  flex: 1 1 210px;
+  max-width: 300px;
+  min-width: 150px;
+}
+.search-box svg {
+  position: absolute;
+  left: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--text-4);
+  pointer-events: none;
+  transition: color 0.16s var(--ease-io);
+}
+.search-box .input {
+  width: 100%;
+  height: 32px;
+  padding-left: 31px;
+  padding-right: 28px;
+  border-radius: 9px;
+  background: var(--ink-4);
+  border-color: transparent;
+  font-size: 12px;
+}
+/* placeholder 走 --text-3 而不是 theme.css 给的 --text-4：它在 --ink-4 底上
+   浅色只有 4.11:1、深色 3.98:1，而提示语是 12px 正文级字号，要 4.5:1。
+   换成 --text-3 后是 5.70 / 4.57 —— 提示语本来就该比已输入内容轻，
+   但「轻」不等于读不出来。 */
+.search-box .input::placeholder {
+  color: var(--text-3);
+}
+.search-box .input:focus {
+  background: var(--ink-2);
+  border-color: var(--gold-line);
+}
+.search-box .input:focus + svg {
+  color: var(--brand-ink);
+}
+.search-clear {
+  position: absolute;
+  right: 5px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 20px;
+  height: 20px;
+  display: none;
+  place-items: center;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-3);
+  cursor: pointer;
+}
+.search-clear:hover {
+  background: var(--line-2);
+  color: var(--text-1);
+}
+.search-box.has-value .search-clear {
+  display: grid;
+}
+
+.chip .n {
+  color: var(--text-3);
+  opacity: 1;
+}
+/* theme.css 的 .chip 是 27px 高的胶囊（padding:4px 10px），和同一行 32px 的
+   搜索框、排序下拉差了 5px，四个控件基线对不齐。工具栏里统一成 32px，
+   高度对齐后这一行的视觉轴线才是一条。 */
+.list-tools .chip {
+  height: 32px;
+  padding: 0 12px;
+}
+/* theme.css 里 .chip.on 的前景色是 var(--gold)，那是给墨黑底设计的浅金。
+   浅色主题下浅金压在浅金底上几乎读不出来，所以这里换成一个深一档的
+   品牌色 --brand-ink（#6b5518），保证选中态文字仍守 4.5:1。 */
+html[data-theme="light"] .chip.on {
+  color: var(--brand-ink);
+  border-color: var(--gold-line);
+}
+.chip.on .n {
+  color: var(--brand-ink);
+  /* 0.72 的透明压在 --gold-soft 上只有 3.47，小字不达标；0.85 到 4.6，
+     仍比主文字淡一档，但读得清。 */
+  opacity: 0.85;
+}
+
+.tools-spacer {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+/* 复习入口：跳转到独立复习台 review.html。
+   数字角标是该去过的词数 —— 没有数字时它是一个「不知道点进去有什么」的按钮，
+   有了数字才知道点进去要做多少事。0 个时按钮仍可点（进去看空态说明）。 */
+.tool-batch {
+  position: relative;
+  height: 32px;
+  padding: 0 12px;
+  border-radius: 9px;
+  border: 1px solid var(--gold-line);
+  background: var(--gold-soft);
+  color: var(--brand-ink);
+  font-family: var(--font-body);
+  font-size: 11.5px;
+  font-weight: 650;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.14s var(--ease-io), border-color 0.14s var(--ease-io);
+}
+.tool-batch:hover {
+  background: color-mix(in srgb, var(--gold) 38%, transparent);
+  border-color: var(--gold-2);
+}
+.tool-batch:active {
+  transform: scale(0.975);
+}
+.tool-batch .soon {
+  min-width: 16px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  /* 数字角标压在金色软底上：用品牌墨色而不是 --text-3，
+     否则和按钮自身的 --brand-ink 抢层级。 */
+  background: color-mix(in srgb, var(--gold) 52%, transparent);
+  color: var(--brand-ink);
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+  letter-spacing: 0.02em;
+}
+html[data-theme="dark"] .tool-batch .soon {
+  /* 深色下 --brand-ink 本身就是亮金 #ffd76e，若再配金色底就成了黄压黄
+     （实测 ratio 1.00）。反色处理：底用高透明金、字用深墨，
+     和侧栏 logo 方块（金底 + #2a2000 字）同一套逻辑。 */
+  background: rgba(255, 215, 110, 0.72);
+  color: #2a2000;
+}
+
+/* 表头 + 行共享的列网格：改一处两边都跟着走
+   六列 = 图标 / 词+徽章+忘记次数 / 音标 / 释义 / 日期 / 操作
+   音标列固定 96px 且 right 对齐：不同音标长度不会把释义列推来推去。 */
+.row-head,
+.wrow {
+  display: grid;
+  grid-template-columns: 26px minmax(0, 1.02fr) 96px minmax(0, 1.55fr) 74px 58px;
+  align-items: center;
+  gap: 10px;
+}
+.row-head {
+  padding: 0 14px 7px;
+  border-bottom: 1px solid var(--line);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-3);
+}
+.row-head .r {
+  text-align: right;
+}
+.rows {
+  display: flex;
+  flex-direction: column;
+}
+
+/* 单词行 */
+.wrow {
+  padding: 9px 14px;
+  border-bottom: 1px solid var(--line);
+  cursor: pointer;
+  animation: rowin 0.34s var(--ease) both;
+  animation-delay: calc(var(--i, 0) * 18ms);
+  transition: background 0.14s var(--ease-io);
+  position: relative;
+}
+@keyframes rowin {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.wrow:last-child {
+  border-bottom: none;
+}
+.wrow:hover {
+  background: var(--ink-4);
+}
+.wrow:focus-visible {
+  outline: 2px solid var(--gold-line);
+  outline-offset: -2px;
+}
+/* 行首的记忆状态色条：不靠颜色单独承载信息（还有徽章 + 文字），
+   只是让扫读时更快定位「哪些词一直记不住」 */
+.wrow::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 9px;
+  bottom: 9px;
+  width: 2px;
+  border-radius: 0 2px 2px 0;
+  background: transparent;
+  transition: background 0.2s var(--ease-io);
+}
+.wrow.s-new::before {
+  background: var(--red);
+  opacity: 0.5;
+}
+.wrow.s-learning::before {
+  background: var(--red);
+  opacity: 0.85;
+}
+.wrow.s-learned::before {
+  background: var(--green);
+  opacity: 0.7;
+}
+/* 短语行不单独着紫色条：它的学习状态（新词/记忆中/已记住）同样重要，
+   s-<status> 已经给出语义；短语这一身份由行首引号图标 + 紫系来源标签
+   承载，色条再分一套颜色会让「这条是不是记得住」更难扫。 */
+
+.w-ico {
+  width: 26px;
+  height: 26px;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  background: var(--ink-4);
+  color: var(--text-2);
+  font-family: var(--font-display);
+  font-size: 12.5px;
+  font-weight: 650;
+  text-transform: uppercase;
+  flex: none;
+}
+.wrow.s-learning .w-ico {
+  background: var(--red-soft);
+  color: var(--red);
+}
+.wrow.s-learned .w-ico {
+  background: var(--green-soft);
+  color: var(--green);
+}
+.w-ico-phrase {
+  background: var(--violet-soft) !important;
+  color: var(--violet) !important;
+  font-size: 13px;
+  padding-top: 5px;
+}
+
+.w-word {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.w-txt {
+  font-family: var(--font-display);
+  font-size: 13.5px;
+  font-weight: 600;
+  letter-spacing: -0.012em;
+  color: var(--text-1);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.w-phon {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  /* 音标用 --text-2 而不是 --text-3：它是这一列唯一的内容，10.5px 的 IPA
+     在 6.6:1 的浅灰上会被当成占位符，而学习者恰恰需要照着它读音。 */
+  color: var(--text-2);
+  text-align: right;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* 短语没有音标，那一列放的是释义来源（大模型/机翻/直译）。它和音标同为
+   12 条以上的「列内小字」，但性质完全不同：不是发音，是可信度标记。
+   改用正文字体 + 紫系（与短语标记同色系）并套一层极淡底，读起来是「标签」
+   而不是「这个音标怎么长得像中文」。 */
+.wrow-phrase .w-phon {
+  font-family: var(--font-body);
+  font-size: 10px;
+  font-weight: 550;
+  color: var(--violet);
+}
+.wrow-phrase .w-phon::before {
+  content: "";
+  display: inline-block;
+  width: 4px;
+  height: 4px;
+  margin-right: 4px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.6;
+  vertical-align: 1.5px;
+}
+.w-zh {
+  font-size: 12px;
+  color: var(--text-2);
+  line-height: 1.4;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.w-date {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--text-3);
+  text-align: right;
+  white-space: nowrap;
+}
+.w-act {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 3px;
+  /* 不再整列隐藏。整列留白会让「操作」表头下面看起来是空的，用户不知道
+     这行能做什么；改成常态就淡淡地摆在那里，指针进到这一行才提亮。
+     信息密度不变，但可发现性从「必须 hover 才知道」变成「扫一眼就知道」。
+
+     透明度取 0.7 而不是更低：这两个图标是这一行仅有的可点击控件，属于
+     WCAG 1.4.11「识别界面组件所必需的视觉信息」——需要 3:1 非文本对比度。
+     --text-3 在白卡上是 6.61:1，压到 0.35 只剩 1.7:1，图标几乎和底色融在
+     一起（实测浅色 1.70 / 深色 1.67，都读不出形状）；0.7 是浅色 3.30、
+     深色 3.06 的临界点，再淡一档就不达标了。 */
+  opacity: 0.7;
+  transition: opacity 0.14s var(--ease-io);
+}
+.wrow:hover .w-act,
+.wrow:focus-within .w-act {
+  opacity: 1;
+}
+.w-act button {
+  width: 24px;
+  height: 24px;
+  display: grid;
+  place-items: center;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-3);
+  cursor: pointer;
+  transition: background 0.14s var(--ease-io), color 0.14s var(--ease-io),
+    border-color 0.14s var(--ease-io);
+}
+.w-act button:hover {
+  background: var(--ink-2);
+  border-color: var(--line-2);
+  color: var(--text-1);
+}
+.w-act .act-del:hover {
+  background: var(--danger-soft);
+  border-color: transparent;
+  color: var(--danger);
+}
+
+/* 状态徽章
+   需求规定「新词」和「记忆中」同属柔和红色族、「已记住」走柔和绿。
+   两者靠三层信息区分，不靠色相硬分：
+     1) 圆点：新词空心（还没碰过）→ 记忆中实心（已经开始记了）
+     2) 底色深浅：新词更淡（--red-soft 再压一档）
+     3) 文字本身（新词 / 记忆中）
+   这样色弱用户读文字也能分清，颜色只是加速扫读。 */
+.pill {
+  padding: 2px 7px;
+  font-size: 10px;
+  flex: none;
+}
+.pill-new {
+  background: color-mix(in srgb, var(--red) 7%, transparent);
+  color: var(--red);
+  /* 7% 的红底在白卡上几乎等于没有，徽章会散成一串浮字；补一圈 18% 的
+     同色描边把它收成胶囊，仍然比「记忆中」的实底浅一档。 */
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--red) 18%, transparent);
+}
+.pill-new::before {
+  background: transparent;
+  box-shadow: inset 0 0 0 1.5px currentColor;
+}
+.pill-learning {
+  background: var(--red-soft);
+  color: var(--red);
+}
+.pill-learned {
+  background: var(--green-soft);
+  color: var(--green);
+}
+/* 短语不做「短语」徽章：徽章位只放学习状态（新词/记忆中/已记住），
+   一格里塞两个不同维度的标签会让每行的扫读节拍乱掉。短语身份由行首
+   引号图标与来源标签承担。 */
+
+/* 忘记次数小标签 */
+.w-forget {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 1px 5px;
+  border-radius: 5px;
+  background: var(--ink-4);
+  /* 这是「忘记过几次」的负向信号，不该是最淡的元素；用 --text-2 让它
+     和释义同级可读，但不着色 —— 只有 ≥3 次才升级成红色告警。 */
+  color: var(--text-2);
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  line-height: 1.5;
+  flex: none;
+}
+.w-forget.hot {
+  background: var(--red-soft);
+  color: var(--red);
+}
+.w-forget svg {
+  opacity: 0.85;
+}
+
+/* 空态 */
+.empty {
+  padding: 40px 20px;
+}
+.empty .empty-mark {
+  background: var(--ink-4);
+  border-color: var(--line);
+  color: var(--text-3);
+}
+.empty .empty-title {
+  color: var(--text-2);
+}
+.empty-sub {
+  font-size: 11.5px;
+  color: var(--text-3);
+  max-width: 320px;
+  line-height: 1.55;
+}
+
+/* ---------------------------------------------------------------- 抽屉 */
+
+.scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  background: var(--scrim);
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 0.24s var(--ease-io), visibility 0.24s;
+  backdrop-filter: blur(2px);
+}
+.scrim.on {
+  opacity: 1;
+  visibility: visible;
+}
+
+/* 从列表行「向下滑出」：锚在顶部，向下展开 + 轻微下沉 */
+.drawer {
+  position: fixed;
+  z-index: 41;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: min(452px, 92vw);
+  display: flex;
+  flex-direction: column;
+  background: var(--ink-2);
+  border-left: 1px solid var(--line);
+  box-shadow: var(--shadow-pop);
+  transform: translateY(-14px);
+  opacity: 0;
+  visibility: hidden;
+  transition: transform 0.32s var(--ease), opacity 0.26s var(--ease-io), visibility 0.32s;
+}
+.drawer.open {
+  transform: none;
+  opacity: 1;
+  visibility: visible;
+}
+.dw-hd {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 20px 20px 14px;
+  border-bottom: 1px solid var(--line);
+}
+.dw-title {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.dw-word {
+  font-family: var(--font-display);
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: -0.03em;
+  line-height: 1.15;
+  color: var(--text-1);
+  word-break: break-word;
+}
+.dw-phon {
+  margin-top: 4px;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--text-3);
+  word-break: break-word;
+}
+.dw-close {
+  flex: none;
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-3);
+  cursor: pointer;
+  transition: background 0.15s var(--ease-io), color 0.15s var(--ease-io);
+}
+.dw-close:hover {
+  background: var(--ink-4);
+  color: var(--text-1);
+}
+
+.dw-body {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  padding: 16px 20px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.dw-sec {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+.dw-sec-hd {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10px;
+  font-weight: 650;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-4);
+}
+.dw-sec-hd svg {
+  opacity: 0.7;
+}
+
+/* 短语标识 */
+.dw-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 7px;
+  border-radius: 6px;
+  background: var(--violet-soft);
+  color: var(--violet);
+  font-size: 10px;
+  font-weight: 650;
+  letter-spacing: 0.02em;
+  align-self: flex-start;
+}
+
+.dw-zh {
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.5;
+  color: var(--text-1);
+  letter-spacing: -0.01em;
+}
+.dw-literal {
+  font-size: 11.5px;
+  color: var(--text-3);
+  line-height: 1.55;
+}
+.dw-note {
+  padding: 7px 9px;
+  border-radius: 8px;
+  background: var(--amber-soft);
+  color: var(--amber);
+  font-size: 11px;
+  line-height: 1.5;
+}
+.dw-words {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px;
+  border-radius: 9px;
+  background: var(--ink-4);
+}
+.dw-wrow {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 3px 4px;
+  border-radius: 6px;
+  font-size: 11.5px;
+}
+.dw-wrow b {
+  font-family: var(--font-display);
+  font-weight: 650;
+  color: var(--text-1);
+  min-width: 68px;
+  flex: none;
+}
+.dw-wrow span {
+  color: var(--text-2);
+}
+
+/* 释义列表 */
+.dw-mean {
+  display: flex;
+  gap: 7px;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--text-2);
+}
+.dw-mean .pos {
+  flex: none;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--brand-ink);
+  min-width: 22px;
+  padding-top: 1px;
+}
+
+/* 小型记忆统计卡片 */
+.dw-stat {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 1px;
+  padding: 1px;
+  border-radius: var(--r-md);
+  background: var(--line);
+  overflow: hidden;
+}
+.dw-stat > div {
+  padding: 9px 8px 8px;
+  background: var(--ink-4);
+  text-align: center;
+}
+.dw-stat .v {
+  font-size: 17px;
+  font-weight: 700;
+  line-height: 1.1;
+  letter-spacing: -0.03em;
+  color: var(--text-1);
+  font-variant-numeric: tabular-nums;
+}
+.dw-stat .k {
+  margin-top: 2px;
+  font-size: 9.5px;
+  color: var(--text-3);
+}
+.dw-stat .v.f {
+  color: var(--red);
+}
+.dw-stat .v.z {
+  color: var(--amber);
+}
+.dw-stat .v.r {
+  color: var(--green);
+}
+/* 细分配额条：一眼看出这个词是「偶发遗忘」还是「反复遗忘」 */
+.dw-mix {
+  display: flex;
+  gap: 2px;
+  height: 4px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: var(--line-2);
+}
+.dw-mix i {
+  display: block;
+  height: 100%;
+  border-radius: 2px;
+}
+.dw-mix .m-f {
+  background: var(--red);
+}
+.dw-mix .m-z {
+  background: var(--amber);
+}
+.dw-mix .m-r {
+  background: var(--green);
+}
+.dw-mix .m-n {
+  background: var(--text-4);
+  opacity: 0.35;
+}
+/* 配额条图例：条本身只有 4px，靠颜色承载「忘记/模糊/记住/未分类」四义，
+   没有图例时读者只能猜。图例只显示实际存在的段，颜色点 6px，字号 9.5px
+   与 .dw-stat .k 同级，不抢数字的注意力。 */
+.dw-mix-leg {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px 10px;
+  margin-top: 6px;
+  font-size: 9.5px;
+  color: var(--text-3);
+}
+.dw-mix-leg span {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.dw-mix-leg i {
+  width: 6px;
+  height: 6px;
+  border-radius: 2px;
+}
+/* 色块用显式的色值，文字走中性灰：
+   条目文字是「忘记 / 模糊 / 记住」这三个词，读者必须先读清它们才知道这条杠
+   有几段语义；把整条 span 压成 currentColor + opacity 会让文字跟着色块一起
+   变淡（浅色下 9.5px 的绿字在 soft 底上只剩 1.95，等于读不出来）。
+   所以色块自己带色、文字统一用 --text-3，两者互不拖累。 */
+.dw-mix-leg .is-f i {
+  background: var(--red);
+}
+.dw-mix-leg .is-z i {
+  background: var(--amber);
+}
+.dw-mix-leg .is-r i {
+  background: var(--green);
+}
+.dw-mix-leg .is-n i {
+  background: var(--text-4);
+}
+/* 值为 0 的那一档不消失，只是色块淡下去（文字保持可读）：
+   图例的作用是「这条杠有哪几种颜色、各代表什么」，少一项读者就会以为
+   那条杠只有两种语义；但把 0 值也画成满饱和色块又会撒谎说「这一档有量」。 */
+.dw-mix-leg .is-off i {
+  opacity: 0.42;
+}
+
+/* 语境引用 */
+.dw-quote {
+  position: relative;
+  padding: 11px 13px 12px 14px;
+  border-radius: 10px;
+  background: var(--ink-4);
+  border-left: 2px solid var(--gold-line);
+  font-size: 12.5px;
+  line-height: 1.65;
+  color: var(--text-1);
+}
+.dw-quote em {
+  font-style: normal;
+  padding: 0 2px;
+  border-radius: 3px;
+  background: var(--gold-soft);
+  box-shadow: inset 0 -1px 0 var(--gold-line);
+  color: var(--text-1);
+  font-weight: 600;
+}
+.dw-quote .q-zh {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px dashed var(--line-2);
+  font-size: 11.5px;
+  line-height: 1.6;
+  /* 译文是学习者真正在读的那一行，提到 --text-2 与英文原句同权重，
+     不再当脚注处理。 */
+  color: var(--text-2);
+}
+.dw-empty-quote {
+  font-size: 11.5px;
+  color: var(--text-4);
+  font-style: italic;
+}
+
+/* 复习评级三键：颜色区分度靠「低饱和红 / 琥珀 / 低饱和绿」 */
+.rate-row {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+.rate {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+  padding: 11px 6px 10px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-md);
+  background: var(--ink-2);
+  color: var(--text-2);
+  font-family: var(--font-body);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: transform 0.14s var(--ease), background 0.16s var(--ease-io),
+    border-color 0.16s var(--ease-io), color 0.16s var(--ease-io),
+    box-shadow 0.16s var(--ease-io);
+}
+.rate svg {
+  flex: none;
+  transition: transform 0.18s var(--ease);
+}
+.rate:hover {
+  transform: translateY(-1px);
+}
+.rate:active {
+  transform: scale(0.97);
+}
+.rate .hint {
+  font-size: 9.5px;
+  font-weight: 500;
+  color: var(--text-3);
+}
+/* 三档评级常态就带各自的底色与图标色，一眼能分出「红=没记住 / 琥珀=半记 /
+   绿=记住了」；hover 只是把同一色再压深一档，不换色相，避免指针一移颜色
+   跳变。用的都是 -soft 底色，饱和度很低，不会盖过正文。 */
+.rate-forget {
+  background: var(--red-soft);
+  border-color: color-mix(in srgb, var(--red) 26%, transparent);
+  color: var(--red);
+}
+.rate-fuzzy {
+  background: var(--amber-soft);
+  border-color: color-mix(in srgb, var(--amber) 26%, transparent);
+  color: var(--amber);
+}
+.rate-remember {
+  background: var(--green-soft);
+  border-color: color-mix(in srgb, var(--green) 26%, transparent);
+  color: var(--green);
+}
+/* 深色下 -soft 只有 14% 透明度，压在 #16161f 上三种色底会塌成同一个深灰块，
+   只能靠文字色区分 —— 三档评级是抽屉里的主操作，底色必须能分开。
+   这里把色底提到 22% 并混进 --ink-2 作为不透明底，保证三块各自带相。
+   琥珀这块还额外提到 26%：深底下红底 rgb(62,42,47) 与 22% 的琥珀底
+   rgb(66,49,26) 只差 33（对比 rgb(30,67,57) 的绿底差 85），红与琥珀在
+   低亮度下最容易糊在一起，而它们恰好是相邻的两个按钮。 */
+html[data-theme="dark"] .rate-forget {
+  background: color-mix(in srgb, var(--red) 22%, var(--ink-2));
+  border-color: color-mix(in srgb, var(--red) 44%, transparent);
+}
+html[data-theme="dark"] .rate-fuzzy {
+  background: color-mix(in srgb, var(--amber) 26%, var(--ink-2));
+  border-color: color-mix(in srgb, var(--amber) 46%, transparent);
+}
+html[data-theme="dark"] .rate-remember {
+  /* 绿在这块深底上比红/琥珀更吃亏（绿色本身亮度低），单独提到 26% 才和
+     另两块看起来同样「有底」，否则正向操作反而是最弱的一颗。 */
+  background: color-mix(in srgb, var(--green) 26%, var(--ink-2));
+  border-color: color-mix(in srgb, var(--green) 50%, transparent);
+}
+html[data-theme="dark"] .rate-forget:hover {
+  background: color-mix(in srgb, var(--red) 30%, var(--ink-2));
+}
+html[data-theme="dark"] .rate-fuzzy:hover {
+  background: color-mix(in srgb, var(--amber) 34%, var(--ink-2));
+}
+html[data-theme="dark"] .rate-remember:hover {
+  background: color-mix(in srgb, var(--green) 30%, var(--ink-2));
+}
+/* 副文案要「弱」但不能靠 opacity 弱：0.72 的透明压在各自的 -soft 底上，
+   浅色下只剩 2.79~2.98，9.5px 的字读不出来。改成把语义色向 --text-2 混到
+   70%（色相还在、饱和度掉下来），实测浅色 5.05~5.41、深色 6.01~7.42，
+   既退到第二层又不牺牲可读性。 */
+.rate-forget .hint {
+  color: color-mix(in srgb, var(--red) 70%, var(--text-2));
+  opacity: 1;
+}
+.rate-fuzzy .hint {
+  color: color-mix(in srgb, var(--amber) 70%, var(--text-2));
+  opacity: 1;
+}
+.rate-remember .hint {
+  color: color-mix(in srgb, var(--green) 70%, var(--text-2));
+  opacity: 1;
+}
+.rate-forget:hover {
+  background: color-mix(in srgb, var(--red) 18%, transparent);
+  border-color: var(--red);
+}
+.rate-fuzzy:hover {
+  background: color-mix(in srgb, var(--amber) 18%, transparent);
+  border-color: var(--amber);
+}
+.rate-remember:hover {
+  background: color-mix(in srgb, var(--green) 18%, transparent);
+  border-color: var(--green);
+}
+/* 点下去的一次性反馈（只闪一下，不做循环动画） */
+.rate.flash {
+  animation: rateflash 0.42s var(--ease);
+}
+@keyframes rateflash {
+  0% {
+    transform: scale(0.96);
+  }
+  55% {
+    transform: scale(1.015);
+  }
+  100% {
+    transform: none;
+  }
+}
+
+/* 底部操作区 */
+.dw-foot {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 20px 14px;
+  /* 底部操作条必须和滚动正文断开：原来用 --line(.07) 的 1px 线，落在白底上
+     几乎看不见，正文滚到最后一屏时会被读成「这一行也是内容」。抬到 --line-2
+     仍是低对比细线，但足以把「内容」和「操作」分成两块。 */
+  border-top: 1px solid var(--line-2);
+  background: var(--ink-1);
+  flex-wrap: wrap;
+}
+.dw-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
+  color: var(--text-3);
+}
+.dw-status .select {
+  height: 28px;
+  padding: 0 24px 0 8px;
+  font-size: 11.5px;
+  border-radius: 8px;
+  background-color: var(--ink-2);
+}
+.dw-foot .spacer {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+/* 底部操作条分两簇：左边「状态 + 删除」是设置类，右边「记一次 + 跳到视频」
+   是动作类。中间用一根 1px 竖线断开，否则删除按钮跟主操作平级排在一起，
+   危险动作看起来和普通按钮一样安全。 */
+.dw-div {
+  flex: none;
+  width: 1px;
+  height: 16px;
+  background: var(--line-2);
+  margin: 0 2px;
+}
+/* .btn-play 与 .btn-del 同理要提权：.btn-sm 在文件后半段用单类把
+   background/border/color 又写了一遍，低优先级的金色底会被它抹成白底灰字
+   （实测过：抽屉底部的「跳到视频」是 rgb(93,86,74) 白底，品牌金完全没生效）。 */
+.btn-sm.btn-play {
+  height: 30px;
+  padding: 0 11px;
+  border-radius: 9px;
+  border-color: var(--gold-line);
+  background: var(--gold-soft);
+  color: var(--brand-ink);
+  font-size: 11.5px;
+  font-weight: 600;
+}
+.btn-sm.btn-play:hover {
+  background: var(--gold-soft);
+  border-color: var(--gold-2);
+  color: var(--brand-ink);
+}
+.btn-sm.btn-play:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+  background: transparent;
+  border-color: var(--line-2);
+  color: var(--text-4);
+}
+/* 删除按钮是 .btn-sm 的变体，而 .btn-sm 那组规则写在文件更后面、同为单类
+   选择器 —— 只写 .btn-del 的话 border/background/color 会被它逐条盖掉，
+   实测只有 :hover（多一个伪类）能生效。所以这里用双类提权，写法与
+   .btn-sm.btn-ghost 一致。 */
+.btn-sm.btn-del {
+  height: 30px;
+  padding: 0 10px;
+  border-radius: 9px;
+  /* 危险语义原来只落在 16px 的图标上，11.5px 的「删除」二字仍是中性灰 ——
+     扫读时先进入眼睛的是文字，红图标容易被读成装饰。现在文字与细边框一起
+     承担危险色，图标只是同色同权重的配角，整颗按钮读作一个动作。
+     仍不铺底色：常态铺红底会让底部三颗按钮一起吵，hover 才升到 --danger-soft。
+     浅色 --danger #a54643 在 --ink-1 #fbfaf7 上 5.7:1，深色 #f2555a 在黑底 5.4:1。 */
+  border-color: color-mix(in srgb, var(--danger) 24%, transparent);
+  background: transparent;
+  color: var(--danger);
+  font-size: 11.5px;
+}
+.btn-del svg {
+  color: currentColor;
+  opacity: 0.9;
+}
+.btn-del:hover {
+  background: var(--danger-soft);
+  border-color: transparent;
+  color: var(--danger);
+}
+.btn-del:hover svg {
+  opacity: 1;
+}
+
+/* 「记一次」：老的不分档入口，故意做成无底色，不和上面的三档评级抢注意力 */
+.btn-sm.btn-ghost {
+  background: transparent;
+  border-color: var(--line-2);
+  color: var(--text-3);
+}
+.btn-sm.btn-ghost:hover {
+  background: var(--ink-4);
+  border-color: var(--line-3);
+  color: var(--text-1);
+}
+
+/* 抽屉里的小按钮通用 */
+.btn-sm {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 30px;
+  padding: 0 10px;
+  border: 1px solid var(--line-2);
+  border-radius: 9px;
+  background: var(--ink-2);
+  color: var(--text-2);
+  font-family: var(--font-body);
+  font-size: 11.5px;
+  font-weight: 550;
+  cursor: pointer;
+  transition: background 0.15s var(--ease-io), border-color 0.15s var(--ease-io),
+    color 0.15s var(--ease-io);
+}
+.btn-sm:hover {
+  color: var(--text-1);
+  border-color: var(--line-3);
+}
+
+/* ---------------------------------------------------------------- toast */
+
+#wb-toast {
+  position: fixed;
+  left: 50%;
+  bottom: 26px;
+  z-index: 60;
+  transform: translateX(-50%) translateY(10px);
+  padding: 9px 16px;
+  border-radius: 10px;
+  background: var(--text-1);
+  color: var(--ink-2);
+  font-size: 12px;
+  font-weight: 550;
+  box-shadow: var(--shadow-pop);
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition: opacity 0.22s var(--ease-io), transform 0.26s var(--ease),
+    visibility 0.26s;
+  max-width: min(440px, 88vw);
+  text-align: center;
+}
+#wb-toast.on {
+  opacity: 1;
+  visibility: visible;
+  transform: translateX(-50%) translateY(0);
+}
+#wb-toast[data-kind="err"] {
+  background: var(--danger);
+  color: #fff;
+}
+
+/* ---------------------------------------------------------------- 响应式
+   目标是「浏览器小窗口」，不是手机：断点按可用宽度降级列数，不改成单列
+   卡片流，也保留桌面端的表格感与快捷键。 */
+
+@media (max-width: 1180px) {
+  /* 1180 起五列已经窄到 173px，但仍比折成 3+2 好看，保持不动 */
+  .kpi {
+    padding: 11px 11px 9px;
+  }
+}
+
+@media (min-width: 721px) and (max-width: 900px) {
+  /* 五列在公司笔记本的半屏宽度（约 700~900）会被挤到 120px 出头，
+     数字和副标题开始互相挤。这里改成 3 + 2：
+     用 6 列网格，前三张各占 2 列，后两张各占 3 列 —— 每一行都铺满，
+     不会留下孤零零的第五张。上下界都写死，避免污染 720 以下的 2 列布局。 */
+  #kpis {
+    grid-template-columns: repeat(6, minmax(0, 1fr));
+  }
+  #kpis .kpi {
+    grid-column: span 2;
+  }
+  #kpis .kpi:nth-child(4),
+  #kpis .kpi:nth-child(5) {
+    grid-column: span 3;
+  }
+}
+
+@media (max-width: 1020px) {
+  .wrap {
+    grid-template-columns: 64px minmax(0, 1fr);
+  }
+  aside {
+    padding: 18px 8px 12px;
+    align-items: center;
+  }
+  .brand {
+    padding: 0 0 14px;
+  }
+  .brand-name,
+  .brand-sub,
+  .side-label,
+  .side-backup,
+  .side-foot,
+  #sideNav button span:not(.count),
+  #sideNav .count {
+    display: none;
+  }
+  #sideNav button {
+    justify-content: center;
+    padding: 9px 0;
+  }
+  .charts {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  main {
+    padding: 20px 18px 48px;
+  }
+  h1 {
+    font-size: 22px;
+  }
+  .row-head,
+  .wrow {
+    grid-template-columns: 28px minmax(0, 1.1fr) minmax(0, 1.6fr) 70px;
+  }
+  .row-head span:nth-child(3),
+  .wrow .w-phon,
+  .row-head span:nth-child(6),
+  .w-act {
+    display: none;
+  }
+  .wrow:hover .w-act {
+    display: flex;
+  }
+}
+
+@media (max-width: 720px) {
+  /* 2 列 × 3 行，第 5 张「平均遗忘率」横跨两列补满空位，
+     这样既不掉到 1 列（那不是桌面浏览器该有的样子），也不留残格。 */
+  #kpis {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  #kpis .kpi:nth-child(5) {
+    grid-column: 1 / -1;
+  }
+  .drawer {
+    width: 100vw;
+    border-left: none;
+  }
+  .top {
+    gap: 12px;
+  }
+  .tool span {
+    display: none;
+  }
+  .tool {
+    padding: 0 9px;
+  }
+  .theme-btn .theme-label {
+    display: inline;
+  }
+  .rate .hint {
+    display: none;
+  }
+}
+
+/* 极窄（侧栏完全收成图标条后仍要能用的最小宽度） */
+@media (max-width: 560px) {
+  .wrap {
+    grid-template-columns: 52px minmax(0, 1fr);
+  }
+  main {
+    padding: 16px 12px 40px;
+  }
+  .dw-stat {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+</style>
 </head>
 <body>
+<div class="wrap">
+  <!-- ================================================================ 侧栏 -->
   <aside>
     <div class="brand">
-      <span class="mark">T</span>
+      <div class="mark">T</div>
       <div>
         <div class="brand-name">Trace</div>
-        <div class="brand-sub">词库看板</div>
+        <div class="brand-sub">生词看板</div>
       </div>
     </div>
 
     <div class="side-label">视图</div>
-    <div class="side-nav" id="sideNav">
-      <button data-view="all" class="on">
-        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
-        全部单词<span class="count" id="cAll">0</span>
+    <nav id="sideNav">
+      <button type="button" data-view="all" class="on" title="全部生词">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h10"/></svg>
+        <span>全部生词</span><span class="count" id="cAll">0</span>
       </button>
-      <button data-view="learned">
-        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>
-        已记住<span class="count" id="cLearned">0</span>
+      <button type="button" data-view="new" title="新词">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+        <span>新词</span><span class="count" id="cNew">0</span>
       </button>
-      <button data-view="learning">
-        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v4"/><path d="M12 18v4"/><path d="M2 12h4"/><path d="M18 12h4"/><circle cx="12" cy="12" r="3"/></svg>
-        记忆中<span class="count" id="cLearning">0</span>
+      <button type="button" data-view="learning" title="记忆中">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7"/><path d="M3 4v5h5"/></svg>
+        <span>记忆中</span><span class="count" id="cLearning">0</span>
       </button>
-      <button data-view="new">
-        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14"/><path d="M5 12h14"/></svg>
-        新词<span class="count" id="cNew">0</span>
+      <button type="button" data-view="learned" title="已记住">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6L9 17l-5-5"/></svg>
+        <span>已记住</span><span class="count" id="cLearned">0</span>
       </button>
-      <button data-view="phrase">
-        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16"/><path d="M4 12h10"/><path d="M4 17h7"/></svg>
-        短语<span class="count" id="cPhrase">0</span>
+      <button type="button" data-view="phrase" title="短语">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6H6a3 3 0 0 0 0 6h3m6 0h3a3 3 0 0 0 0-6h-3"/><path d="M8 9h8"/></svg>
+        <span>短语</span><span class="count" id="cPhrase">0</span>
       </button>
-    </div>
+    </nav>
 
-    <div class="side-label">备份</div>
+    <!-- 复习台入口：与「视图筛选」是两种性质的动作（筛选是看，复习是做），
+         所以不放进 nav 里 —— 放进去它会跟着 data-view 一起被点亮，语义就混了。 -->
+    <button type="button" class="side-review" id="sideReview" title="打开复习台，逐张过一遍到期的词">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 5.5h9M4 12h9M4 18.5h5"/><path d="M20 8.5l-5.5 6.5-3-3"/></svg>
+      <span>开始复习</span>
+      <span class="count" id="cDue">0</span>
+    </button>
+
+    <div class="side-label push">本地备份</div>
     <div class="side-backup">
-      <button class="bk-dir" id="pickDirBtn">
-        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
+      <button type="button" class="bk-dir" id="pickDirBtn" title="选择一个文件夹，备份会直接写进去">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7.5A2.5 2.5 0 0 1 5.5 5H9l2 2.5h7.5A2.5 2.5 0 0 1 21 10v7.5A2.5 2.5 0 0 1 18.5 20h-13A2.5 2.5 0 0 1 3 17.5z"/></svg>
         <span id="pickDirLabel">选择备份文件夹</span>
       </button>
-      <div class="bk-hint" id="bkHint">还没选目录，备份会存到「下载」</div>
+      <div class="bk-hint" id="bkHint">还没选目录：自动备份会跳过，手动备份存到「下载」</div>
       <label class="bk-row">
         <span>自动备份</span>
         <span class="switch"><input type="checkbox" id="autoBackup" /><span class="track"></span></span>
@@ -972,102 +2093,128 @@
     </div>
 
     <div class="side-foot">
-      数据保存在本机 IndexedDB；选定文件夹后会额外<br />
-      写一份 <code>trace-wordbook-backup.json</code> 到那里，<br />
-      卸载扩展重装后用「恢复」找回
+      数据只存在本机 IndexedDB，不上传任何服务器。<br />
+      备份文件：<code>trace-wordbook-backup.json</code>
     </div>
   </aside>
 
+  <!-- ================================================================ 主区 -->
   <main>
-    <div class="top">
-      <div>
-        <h1>词库看板</h1>
-        <div class="sub" id="subLine">—</div>
+    <!-- 1. 页头 -->
+    <header class="top">
+      <div class="top-title">
+        <h1>Trace <span class="accent">生词本</span></h1>
+        <p class="sub" id="subLine">正在读取…</p>
       </div>
       <div class="top-tools">
-        <input class="input" type="search" id="q" placeholder="搜索单词 / 释义 / 上下文…" />
-        <button class="btn btn-ghost" id="restoreBtn" title="从备份 JSON 恢复生词本">恢复</button>
-        <button class="btn btn-ghost" id="exportBtn">导出</button>
-        <button class="btn btn-primary" id="backupBtn" title="把生词本写成本机文件，卸载扩展也不会丢">备份到文件</button>
+        <button type="button" class="tool theme-btn" id="themeBtn" title="切换浅色 / 深色主题" aria-label="切换主题">
+          <span class="theme-ico">
+            <!-- 浅色时显示月亮（表示「可切到深色」），深色时显示太阳 -->
+            <svg class="i-moon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20.5 14.5A8.5 8.5 0 0 1 9.5 3.5a8.5 8.5 0 1 0 11 11z"/></svg>
+            <svg class="i-sun" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4.2"/><path d="M12 2.2v2.4M12 19.4v2.4M2.2 12h2.4M19.4 12h2.4M5.1 5.1l1.7 1.7M17.2 17.2l1.7 1.7M18.9 5.1l-1.7 1.7M6.8 17.2l-1.7 1.7"/></svg>
+          </span>
+          <span class="theme-label" id="themeLabel">浅色 / 深色</span>
+        </button>
+        <button type="button" class="tool" id="exportBtn" title="导出为 JSON 文件（不联网，仅下载到本机）">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v11"/><path d="M8 10.5l4 4 4-4"/><path d="M4 15.5V18a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2.5"/></svg>
+          <span>导出备份</span>
+        </button>
+        <button type="button" class="tool" id="restoreBtn" title="从 JSON 文件导入恢复（本地文件，不联网）">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 15V4"/><path d="M8 7.5l4-4 4 4"/><path d="M4 15.5V18a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2.5"/></svg>
+          <span>导入恢复</span>
+        </button>
+        <button type="button" class="tool tool-key" id="backupBtn" title="立刻把生词本写进本机备份文件">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4.5 4.5h11L19.5 8.5v11h-15z"/><path d="M8 4.5v5h7v-5"/><path d="M8 19.5v-6h8v6"/></svg>
+          <span id="backupLabel">立即备份</span>
+        </button>
       </div>
-    </div>
+    </header>
 
-    <!-- KPI -->
-    <div class="kpis" id="kpis">
-      <div class="card kpi rise" style="--i:0">
+    <!-- 2. KPI 概览 -->
+    <section id="kpis">
+      <div class="card kpi rise" style="--i: 0">
         <div class="kpi-top">
-          <span class="kpi-lbl">生词总数</span>
-          <span class="kpi-ico" style="background: var(--gold-soft); color: var(--gold)">
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
+          <span class="kpi-lbl">总词汇</span>
+          <span class="kpi-ico" style="background: var(--gold-soft); color: var(--brand-ink)">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H19v15.5H6.5A2.5 2.5 0 0 0 4 21z"/><path d="M4 18.5V5.5"/></svg>
           </span>
         </div>
         <div class="kpi-val num" id="kTotal">0</div>
-        <div class="kpi-delta" id="dTotal">本周新增 <b>0</b></div>
-        <svg class="kpi-spark" id="spTotal" viewBox="0 0 120 26" preserveAspectRatio="none"></svg>
+        <div class="kpi-delta" id="dTotal">本周新增 <b>+0</b></div>
+        <svg class="kpi-spark" id="spTotal" viewBox="0 0 120 26" preserveAspectRatio="none" aria-hidden="true"></svg>
       </div>
 
-      <div class="card kpi rise" style="--i:1">
-        <div class="kpi-top">
-          <span class="kpi-lbl">已记住</span>
-          <span class="kpi-ico" style="background: var(--green-soft); color: var(--green)">
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>
-          </span>
-        </div>
-        <div class="kpi-val num" id="kLearned">0</div>
-        <div class="kpi-delta" id="dLearned">掌握率 <b>0%</b></div>
-        <svg class="kpi-spark" id="spLearned" viewBox="0 0 120 26" preserveAspectRatio="none"></svg>
-      </div>
-
-      <div class="card kpi rise" style="--i:2">
-        <div class="kpi-top">
-          <span class="kpi-lbl">记忆中</span>
-          <span class="kpi-ico" style="background: var(--amber-soft); color: var(--amber)">
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
-          </span>
-        </div>
-        <div class="kpi-val num" id="kLearning">0</div>
-        <div class="kpi-delta" id="dLearning">复习次数 <b>0</b></div>
-        <svg class="kpi-spark" id="spLearning" viewBox="0 0 120 26" preserveAspectRatio="none"></svg>
-      </div>
-
-      <div class="card kpi rise" style="--i:3">
+      <div class="card kpi rise" style="--i: 1">
         <div class="kpi-top">
           <span class="kpi-lbl">今日新增</span>
           <span class="kpi-ico" style="background: var(--violet-soft); color: var(--violet)">
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14"/><path d="M5 12h14"/></svg>
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
           </span>
         </div>
         <div class="kpi-val num" id="kToday">0</div>
         <div class="kpi-delta" id="dToday">昨日 <b>0</b></div>
-        <svg class="kpi-spark" id="spToday" viewBox="0 0 120 26" preserveAspectRatio="none"></svg>
+        <svg class="kpi-spark" id="spToday" viewBox="0 0 120 26" preserveAspectRatio="none" aria-hidden="true"></svg>
       </div>
-    </div>
 
-    <!-- 图表 -->
-    <div class="charts">
-      <div class="card">
+      <div class="card kpi rise" id="kpiDue" style="--i: 2">
+        <div class="kpi-top">
+          <span class="kpi-lbl">待复习</span>
+          <span class="kpi-ico" style="background: var(--amber-soft); color: var(--amber)">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 1.8"/></svg>
+          </span>
+        </div>
+        <div class="kpi-val num" id="kDue">0</div>
+        <div class="kpi-delta" id="dDue">间隔复习已到期 <b>0</b></div>
+        <svg class="kpi-spark" id="spLearning" viewBox="0 0 120 26" preserveAspectRatio="none" aria-hidden="true"></svg>
+      </div>
+
+      <div class="card kpi rise" style="--i: 3">
+        <div class="kpi-top">
+          <span class="kpi-lbl">总复习次数</span>
+          <span class="kpi-ico" style="background: var(--green-soft); color: var(--green)">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3.5 12a8.5 8.5 0 0 1 14.6-5.9L21 9"/><path d="M21 4.5V9h-4.5"/><path d="M20.5 12a8.5 8.5 0 0 1-14.6 5.9L3 15"/><path d="M3 19.5V15h4.5"/></svg>
+          </span>
+        </div>
+        <div class="kpi-val num" id="kReviews">0</div>
+        <div class="kpi-delta" id="dReviews">已记住 <b>0</b></div>
+        <svg class="kpi-spark" id="spLearned" viewBox="0 0 120 26" preserveAspectRatio="none" aria-hidden="true"></svg>
+      </div>
+
+      <div class="card kpi rise" style="--i: 4">
+        <div class="kpi-top">
+          <span class="kpi-lbl">平均遗忘率</span>
+          <span class="kpi-ico" style="background: var(--red-soft); color: var(--red)">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 17l5-6 4 3.5 4.5-6 4.5 4"/><path d="M3 20.5h18"/></svg>
+          </span>
+        </div>
+        <div class="kpi-val num" id="kForget"><span class="sm">0</span>%</div>
+        <div class="kpi-delta" id="dForget">共忘记 <b>0</b> 次</div>
+        <svg class="kpi-spark" id="spForget" viewBox="0 0 120 26" preserveAspectRatio="none" aria-hidden="true"></svg>
+      </div>
+    </section>
+
+    <!-- 3. 图表 -->
+    <section class="charts">
+      <div class="card chart-card">
         <div class="card-hd">
-          <div>
-            <div class="card-title">单词增长</div>
-            <div class="card-sub" id="chartSub">按日统计</div>
-          </div>
-          <div class="seg" id="gran" style="width: 168px">
-            <button data-g="day" class="on">日</button>
-            <button data-g="week">周</button>
-            <button data-g="month">月</button>
+          <span class="card-title">词汇增长</span>
+          <span class="card-sub" id="chartSub">最近 30 天</span>
+          <div class="seg" id="gran" style="width: 150px">
+            <button type="button" data-g="day" class="on" title="按天统计">日</button>
+            <button type="button" data-g="week" title="按周统计">周</button>
+            <button type="button" data-g="month" title="按月统计">月</button>
           </div>
         </div>
         <div class="chart-wrap">
+          <div class="chart-grid" id="barGrid"></div>
           <div class="bars" id="bars"></div>
         </div>
       </div>
 
-      <div class="card">
+      <div class="card chart-card">
         <div class="card-hd">
-          <div>
-            <div class="card-title">学习状态</div>
-            <div class="card-sub">点击筛选对应单词</div>
-          </div>
+          <span class="card-title">记忆状态占比</span>
+          <span class="card-sub">点击筛选</span>
         </div>
         <div class="donut-wrap">
           <div class="donut" id="donut">
@@ -1079,54 +2226,98 @@
           <div class="legend" id="legend"></div>
         </div>
       </div>
-    </div>
+    </section>
 
-    <!-- 词表 -->
-    <div class="card list-card">
+    <!-- 4. 工具栏 + 列表 -->
+    <section class="card list-card">
       <div class="list-tools">
-        <span class="chip on" data-f="all">全部</span>
-        <span class="chip" data-f="new">新词</span>
-        <span class="chip" data-f="learning">记忆中</span>
-        <span class="chip" data-f="learned">已记住</span>
-        <span class="chip" data-f="phrase">短语</span>
-        <span style="flex: 1"></span>
-        <select class="select" id="sort" style="font-size: 11.5px">
-          <option value="new">最新加入</option>
-          <option value="old">最早加入</option>
-          <option value="az">字母 A→Z</option>
-          <option value="rev">复习最多</option>
+        <div class="search-box" id="searchBox">
+          <input class="input" id="q" type="search" placeholder="搜索单词 / 释义 / 上下文…" autocomplete="off" spellcheck="false" />
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="M15.5 15.5L21 21"/></svg>
+          <button type="button" class="search-clear" id="qClear" title="清空搜索" aria-label="清空搜索">
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+          </button>
+        </div>
+
+        <div style="display: flex; gap: 5px; flex-wrap: wrap">
+          <span class="chip on" data-f="all">全部 <span class="n" id="fAll">0</span></span>
+          <span class="chip" data-f="new">新词 <span class="n" id="fNew">0</span></span>
+          <span class="chip" data-f="learning">记忆中 <span class="n" id="fLearning">0</span></span>
+          <span class="chip" data-f="learned">已记住 <span class="n" id="fLearned">0</span></span>
+          <span class="chip" data-f="phrase">短语 <span class="n" id="fPhrase">0</span></span>
+        </div>
+
+        <span class="tools-spacer"></span>
+
+        <button type="button" class="tool-batch" id="batchBtn" title="打开复习台，把到期待复习的词一张张过一遍">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 5.5h10M4 12h10M4 18.5h6"/><path d="M17 12.5l2 2 3-3.5"/></svg>
+          开始复习
+          <span class="soon" id="batchDue">0</span>
+        </button>
+
+        <select class="select" id="sort" title="排序方式" style="height: 32px; border-radius: 9px; font-size: 11.5px">
+          <option value="new">加入时间排序</option>
+          <option value="forget">优先遗忘最多</option>
+          <option value="learned">优先已记住</option>
+          <option value="old">优先最早加入</option>
         </select>
       </div>
+
       <div class="row-head">
         <span></span>
-        <span>单词</span>
+        <span>单词 / 短语</span>
         <span>音标</span>
-        <span>释义 / 上下文</span>
-        <span style="text-align: right">加入时间</span>
-        <span style="text-align: right">操作</span>
+        <span>释义 · 上下文</span>
+        <span class="r">加入时间</span>
+        <span class="r">操作</span>
       </div>
       <div class="rows" id="rows"></div>
-    </div>
+    </section>
   </main>
+</div>
 
-  <div class="scrim" id="scrim"></div>
-  <div class="drawer" id="drawer">
-    <div class="dw-hd">
-      <div style="flex: 1; min-width: 0">
-        <div class="dw-word" id="dwWord">—</div>
-        <div class="dw-phon" id="dwPhon"></div>
-      </div>
-      <button class="btn btn-icon btn-ghost" id="dwClose" title="关闭">
-        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6L6 18"/><path d="M6 6l12 12"/></svg>
-      </button>
+<!-- ================================================================ 抽屉 -->
+<div class="scrim" id="scrim"></div>
+<aside class="drawer" id="drawer" role="dialog" aria-modal="true" aria-labelledby="dwWord">
+  <div class="dw-hd">
+    <div class="dw-title">
+      <div class="dw-word" id="dwWord">—</div>
+      <div class="dw-phon" id="dwPhon"></div>
     </div>
-    <div class="dw-body" id="dwBody"></div>
-    <div class="dw-foot">
-      <button class="btn" id="dwPlay">跳到视频</button>
-      <button class="btn btn-primary" id="dwReview">标记复习</button>
-    </div>
+    <button type="button" class="dw-close" id="dwClose" title="关闭（Esc）" aria-label="关闭">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+    </button>
   </div>
+  <div class="dw-body" id="dwBody"></div>
+  <div class="dw-foot">
+    <label class="dw-status" title="手动指定记忆状态（不影响复习次数）">
+      <span>状态</span>
+      <select class="select" id="dwStatus">
+        <option value="new">新词</option>
+        <option value="learning">记忆中</option>
+        <option value="learned">已记住</option>
+      </select>
+    </label>
+    <span class="dw-div" aria-hidden="true"></span>
+    <button type="button" class="btn-sm btn-del" id="dwDelete" title="从生词本删除这个单词">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h16"/><path d="M9.5 7V4.8h5V7"/><path d="M6 7l.9 12.2A2 2 0 0 0 8.9 21h6.2a2 2 0 0 0 2-1.8L18 7"/><path d="M10 11v6M14 11v6"/></svg>
+      删除
+    </button>
+    <span class="spacer"></span>
+    <!-- 这一颗是「不分档、只 +1 次数」的老入口，保留是为了兼容原有逻辑与
+         快捷键习惯；它不该和三档评级抢主按钮的位置，所以降成次级样式。 -->
+    <button type="button" class="btn-sm btn-ghost" id="dwReview" title="只记一次复习（不区分记得牢不牢，快捷键 R）">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3.5 12a8.5 8.5 0 1 1 2.6 6.1"/><path d="M3.5 19v-5h5"/></svg>
+      记一次
+    </button>
+    <button type="button" class="btn-sm btn-play" id="dwPlay" title="在 YouTube 原视频对应时间点打开">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 4h6v6"/><path d="M20 4l-8.5 8.5"/><path d="M19 14.5V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h4.5"/></svg>
+      跳到视频
+    </button>
+  </div>
+</aside>
 
-  <script src="wordbook.js"></script>
+<script src="wordbook.js"></script>
 </body>
 </html>
+

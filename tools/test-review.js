@@ -51,6 +51,29 @@ function check(name, ok, extra) {
   console.log(`${ok ? '✓' : '✗'} ${name}${extra ? ' ' + JSON.stringify(extra) : ''}`);
 }
 
+/**
+ * 轮询某个词在 IDB 里的 reviewCount，直到等于期望值或超时。
+ *
+ * 为什么不能写死等待时长：页面里的停留判定是 `setTimeout(800)`，
+ * 而测试只等 1400ms 就移开鼠标 —— 移开同时会 clearTimeout。跑全量时
+ * 多套件并发、Chrome 主线程被阻塞，那个定时器可以晚触发几百毫秒，
+ * 于是「等待窗口内没触发 → 移开时被取消 → 计数不增」，S11 在 run-all
+ * 里偶发失败而单跑必过，就是这么来的。改成轮询真实状态再移开鼠标。
+ */
+async function waitReviewCount(sw, word, want, timeout = 10000) {
+  const t0 = Date.now();
+  let last = null;
+  while (Date.now() - t0 < timeout) {
+    last = await sw.evaluate(async (w) => {
+      const r = await globalThis.__traceDebug.idbGet('words', w);
+      return r ? r.reviewCount : null;
+    }, word);
+    if (last === want) return { ok: true, ms: Date.now() - t0, last };
+    await new Promise((r) => setTimeout(r, 150));
+  }
+  return { ok: false, ms: Date.now() - t0, last };
+}
+
 /** 把 rgb(...) 归成「红系 / 绿系 / 其它」——不锁死具体色值，只判色相倾向 */
 function hueOf(rgb) {
   const m = /(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/.exec(rgb || '');
@@ -340,11 +363,19 @@ function hueOf(rgb) {
   });
 
   // 停留够久 → 计数 +1
+  //
+  // 悬停不放，轮询到计数真的 +1 再移开（而不是死等 1400ms）：
+  // 800ms 的 setTimeout 在全量跑时可能被主线程阻塞推迟，写死时长会误判。
+  let dwellWait = { ok: false, ms: 0, last: null };
   if (zbox) {
     await page.mouse.move(zbox.x, zbox.y);
-    await page.waitForTimeout(1400);
+    dwellWait = await waitReviewCount(
+      sw,
+      'beverage',
+      (before?.reviewCount ?? 0) + 1
+    );
     await page.mouse.move(5, 5);
-    await page.waitForTimeout(600);
+    await page.waitForTimeout(400);
   }
   const afterDwell = await sw.evaluate(async () => {
     const r = await globalThis.__traceDebug.idbGet('words', 'beverage');
@@ -353,16 +384,33 @@ function hueOf(rgb) {
   check(
     'S11 停留够久记一次复习',
     (afterDwell?.reviewCount ?? 0) === (before?.reviewCount ?? 0) + 1,
-    { before: before?.reviewCount, after: afterDwell?.reviewCount, status: afterDwell?.status }
+    {
+      before: before?.reviewCount,
+      after: afterDwell?.reviewCount,
+      status: afterDwell?.status,
+      waitedMs: dwellWait.ms,
+    }
   );
 
   // ---- S12：同一句内只记一次 ----
+  // 连续三次「悬停超过停留阈值再移开」，每次之后确认计数没有涨。
+  // 用轮询而不是固定等待：涨了要立刻判定失败，而不是等到最后才发现。
+  let repeatGrew = false;
   if (zbox) {
     for (let i = 0; i < 3; i++) {
       await page.mouse.move(zbox.x, zbox.y);
+      // 等满一个停留窗口再多给 400ms 余量，然后移开
       await page.waitForTimeout(1200);
       await page.mouse.move(5, 5);
       await page.waitForTimeout(300);
+      const now = await sw.evaluate(async () => {
+        const r = await globalThis.__traceDebug.idbGet('words', 'beverage');
+        return r ? r.reviewCount : null;
+      });
+      if (now !== afterDwell?.reviewCount) {
+        repeatGrew = true;
+        break;
+      }
     }
   }
   const afterRepeat = await sw.evaluate(async () => {
@@ -372,6 +420,7 @@ function hueOf(rgb) {
   check('S12 同一句里反复划过只记一次', afterRepeat === afterDwell?.reviewCount, {
     afterDwell: afterDwell?.reviewCount,
     afterRepeat,
+    repeatGrew,
   });
 
   // ---- S13/S14：卡片「标记为已记住」 ----

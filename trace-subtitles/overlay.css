@@ -953,6 +953,46 @@
   font-size: 13px;
   padding: 8px 0;
 }
+/*
+ * 词典查空时的占位块。
+ *
+ * 早期这里什么都没有：卡片只剩标题 + 本句译文 + 按钮，中间一片留白，
+ * 用户以为是扩展坏了（m01142 的原话是「单独点击没有解释意思」）。
+ * 所以它必须「看起来像一条说明」，而不是像忘渲染 —— 用左侧竖线做视觉锚点，
+ * 文字压到 --pop-dim 一档，别再抢本句译文的注意力。
+ */
+#trace-word-popup .trace-pop-miss {
+  margin: 2px 0 10px;
+  padding: 9px 11px 10px;
+  border-left: 3px solid var(--pop-line);
+  border-radius: 0 6px 6px 0;
+  background: var(--pop-block-bg);
+}
+#trace-word-popup .trace-pop-miss-title {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--pop-dim);
+}
+#trace-word-popup .trace-pop-miss-sub {
+  margin-top: 3px;
+  font-size: 11.5px;
+  line-height: 1.55;
+  color: var(--pop-faint);
+}
+#trace-word-popup .trace-pop-retry {
+  margin-top: 8px;
+  padding: 4px 10px;
+  border: 1px solid var(--pop-line);
+  border-radius: 7px;
+  background: transparent;
+  color: var(--pop-dim);
+  font-size: 11.5px;
+  cursor: pointer;
+}
+#trace-word-popup .trace-pop-retry:hover {
+  border-color: var(--pop-accent);
+  color: var(--pop-accent);
+}
 #trace-word-popup .trace-pop-actions {
   margin-top: 10px;
 }

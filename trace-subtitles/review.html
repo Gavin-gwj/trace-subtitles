@@ -1,0 +1,1461 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Trace 复习台</title>
+<link rel="stylesheet" href="theme.css" />
+<link rel="stylesheet" href="theme-tokens.css" />
+<style>
+/* ============================================================================
+   Trace 复习台 · review.html
+
+   主题变量在 theme-tokens.css（与 wordbook.html 共用一份）。
+   本文件只写这个页面自己的组件。
+
+   设计取向：这是「一次只做一件事」的页面 —— 屏幕中央永远只有一张卡片，
+   其余全部是围绕它的进度与打卡信息。所以布局从卡片的阅读节奏反推：
+   卡片宽不过 720px（再宽一行字就超出舒适视距），字号按「隔一臂距离读」
+   定，评级按钮放在拇指/鼠标自然落点上。
+   ========================================================================== */
+
+body {
+  background: var(--ink-0);
+  color: var(--text-1);
+  min-height: 100vh;
+}
+
+.wrap {
+  display: grid;
+  grid-template-columns: 216px minmax(0, 1fr);
+  min-height: 100vh;
+}
+
+/* ================================================================ 左侧栏 */
+
+aside {
+  position: sticky;
+  top: 0;
+  align-self: start;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 22px 14px 16px;
+  border-right: 1px solid var(--line);
+  background: var(--ink-1);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 0 4px 14px;
+}
+.brand .mark {
+  width: 26px;
+  height: 26px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  border-radius: 9px;
+  background: linear-gradient(140deg, var(--gold) 0%, var(--gold-2) 100%);
+  color: #2a2000;
+  font-family: var(--font-display);
+  font-size: 14px;
+  font-weight: 800;
+  letter-spacing: -0.04em;
+}
+.brand-name {
+  font-family: var(--font-display);
+  font-size: 14.5px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1.2;
+}
+.brand-sub {
+  font-size: 10.5px;
+  color: var(--text-3);
+  line-height: 1.3;
+}
+
+.side-label {
+  font-size: 10px;
+  font-weight: 650;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-4);
+  padding: 0 4px 4px;
+}
+.side-label.push { margin-top: auto; }
+
+.side-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin-bottom: 10px;
+}
+.side-nav a,
+.side-nav button {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 7px 9px;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--text-2);
+  font-family: var(--font-body);
+  font-size: 12.5px;
+  font-weight: 500;
+  text-align: left;
+  text-decoration: none;
+  cursor: pointer;
+  transition: background 0.14s, color 0.14s, border-color 0.14s;
+}
+.side-nav a:hover,
+.side-nav button:hover {
+  background: var(--ink-4);
+  color: var(--text-1);
+}
+.side-nav a.on,
+.side-nav button.on {
+  background: var(--gold-soft);
+  border-color: var(--gold-line);
+  color: var(--text-1);
+  font-weight: 600;
+}
+.side-nav svg { opacity: 0.62; flex: none; }
+.side-nav .on svg { opacity: 1; color: var(--brand-ink); }
+
+/* ------------------------------------------------------------ 今日目标环 */
+
+.goal {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 16px 10px 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--ink-2);
+  box-shadow: var(--shadow-card);
+}
+.goal-ring {
+  position: relative;
+  width: 118px;
+  height: 118px;
+  flex: none;
+}
+.goal-ring svg { width: 100%; height: 100%; transform: rotate(-90deg); }
+.goal-ring .g-bg {
+  fill: none;
+  stroke: var(--ink-4);
+  stroke-width: 9;
+}
+.goal-ring .g-fill {
+  fill: none;
+  stroke: var(--gold);
+  stroke-width: 9;
+  stroke-linecap: round;
+  /* 周长 2πr，r=52 → 326.73。dashoffset 由 JS 按完成比例设置 */
+  stroke-dasharray: 326.73;
+  stroke-dashoffset: 326.73;
+  transition: stroke-dashoffset 0.5s var(--ease);
+}
+.goal-center {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-content: center;
+  text-align: center;
+  pointer-events: none;
+}
+.goal-num {
+  font-family: var(--font-display);
+  font-size: 26px;
+  font-weight: 700;
+  line-height: 1.05;
+  letter-spacing: -0.035em;
+  font-variant-numeric: tabular-nums;
+}
+.goal-of {
+  margin-top: 2px;
+  font-size: 10.5px;
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+.goal-lbl {
+  font-size: 10.5px;
+  font-weight: 550;
+  color: var(--text-3);
+}
+
+/* ------------------------------------------------------------ 连续打卡 */
+
+.streak {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 11px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--ink-2);
+  box-shadow: var(--shadow-card);
+}
+.streak .st-ico {
+  width: 30px;
+  height: 30px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  border-radius: 9px;
+  background: var(--gold-soft);
+  color: var(--brand-ink);
+}
+.streak-n {
+  font-family: var(--font-display);
+  font-size: 19px;
+  font-weight: 700;
+  line-height: 1.1;
+  letter-spacing: -0.03em;
+  font-variant-numeric: tabular-nums;
+}
+.streak-l {
+  font-size: 10.5px;
+  color: var(--text-3);
+  margin-top: 1px;
+}
+.streak-best {
+  margin-left: auto;
+  font-size: 10px;
+  color: var(--text-3);
+  text-align: right;
+  line-height: 1.35;
+}
+.streak-best b {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-2);
+  font-variant-numeric: tabular-nums;
+}
+
+.week-dots {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 4px;
+  padding: 4px 2px 0;
+}
+.week-dots i {
+  display: block;
+  height: 5px;
+  border-radius: 3px;
+  background: var(--hm-0);
+}
+.week-dots i.on { background: var(--hm-3); }
+.week-dots i.best { background: var(--hm-4); }
+.week-dow {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 4px;
+  padding: 5px 2px 0;
+  font-size: 9px;
+  color: var(--text-4);
+  text-align: center;
+}
+
+.side-foot {
+  padding: 12px 6px 0;
+  font-size: 10.5px;
+  line-height: 1.6;
+  color: var(--text-3);
+  border-top: 1px solid var(--line);
+}
+
+/* ================================================================ 主区 */
+
+/* 主区撑满 grid 的第二列，和词库页保持同一套宽度策略。
+   以前这里是 max-width:1120px，在 grid 里又没写 margin:auto，
+   于是 1440+ 的窗口右侧会空出 240px 死白，而左边紧贴侧栏 —— 左右不对称。
+   上限留到 1560px 只是为了极宽屏别把四张统计卡拉得太散，正常窗口不会触发。 */
+main {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  width: 100%;
+  max-width: 1560px;
+  margin-inline: auto;
+  padding: 26px 30px 56px;
+}
+
+.top {
+  display: flex;
+  align-items: flex-start;
+  gap: 20px;
+  flex-wrap: wrap;
+}
+.top-title { flex: 1 1 320px; min-width: 0; }
+.top h1 {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 25px;
+  font-weight: 700;
+  letter-spacing: -0.028em;
+  line-height: 1.2;
+}
+.top h1 .accent { color: var(--brand-ink); }
+.sub {
+  margin: 5px 0 0;
+  font-size: 11.5px;
+  color: var(--text-3);
+  line-height: 1.5;
+}
+
+.top-tools {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.tool {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 34px;
+  padding: 0 12px;
+  border: 1px solid var(--line-2);
+  border-radius: 10px;
+  background: var(--ink-2);
+  color: var(--text-2);
+  font-family: var(--font-body);
+  font-size: 11.5px;
+  font-weight: 550;
+  cursor: pointer;
+  transition: background 0.16s, border-color 0.16s, color 0.16s;
+}
+.tool:hover {
+  background: var(--ink-1);
+  border-color: var(--line-3);
+  color: var(--text-1);
+}
+.tool:active { transform: scale(0.975); }
+.tool svg { flex: none; }
+.tool-key {
+  border-color: var(--gold-line);
+  background: var(--gold-soft);
+  color: var(--brand-ink);
+  font-weight: 650;
+}
+.tool-key:hover {
+  background: var(--gold-soft);
+  border-color: var(--gold-2);
+  color: var(--brand-ink);
+}
+
+.theme-btn { position: relative; overflow: hidden; }
+.theme-ico {
+  position: relative;
+  width: 16px;
+  height: 16px;
+  flex: none;
+  display: block;
+}
+.theme-ico svg {
+  position: absolute;
+  inset: 0;
+  transition: opacity 0.26s var(--ease), transform 0.3s var(--ease);
+}
+html[data-theme="light"] .theme-ico .i-sun { opacity: 0; transform: rotate(-40deg) scale(0.7); }
+html[data-theme="dark"] .theme-ico .i-moon { opacity: 0; transform: rotate(40deg) scale(0.7); }
+
+/* ---------------------------------------------------------------- 统计条 */
+
+.stats {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+.stat {
+  min-width: 0;
+  padding: 12px 13px 11px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--ink-2);
+  box-shadow: var(--shadow-card);
+  overflow: hidden;
+}
+.stat-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.stat-lbl {
+  font-size: 11px;
+  font-weight: 550;
+  color: var(--text-3);
+  white-space: nowrap;
+}
+.stat-ico {
+  width: 22px;
+  height: 22px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  border-radius: 7px;
+}
+.stat-val {
+  margin-top: 7px;
+  font-family: var(--font-display);
+  font-size: 24px;
+  font-weight: 700;
+  line-height: 1.05;
+  letter-spacing: -0.035em;
+  font-variant-numeric: tabular-nums;
+}
+.stat-val .sm { font-size: 18px; }
+.stat-sub {
+  margin-top: 3px;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--text-3);
+  min-height: 16px;
+  overflow: hidden;
+}
+.stat-sub b { font-weight: 650; color: var(--text-1); font-variant-numeric: tabular-nums; }
+
+/* ================================================================ 复习舞台 */
+
+.stage {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px 18px 18px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-xl);
+  background: var(--ink-1);
+  box-shadow: var(--shadow-card);
+}
+
+.stage-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 18px;
+}
+.prog-lbl {
+  flex: none;
+  font-size: 11px;
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+.prog-lbl b { color: var(--text-1); font-weight: 650; }
+.prog {
+  display: flex;
+  gap: 3px;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.prog i {
+  flex: 1 1 0;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--line-2);
+  transition: background 0.24s var(--ease);
+}
+.prog i.done { background: var(--gold); }
+.prog i.now { background: var(--gold-2); }
+.prog.bar {
+  height: 4px;
+  border-radius: 2px;
+  background: var(--line-2);
+  overflow: hidden;
+  display: block;
+}
+.prog.bar i {
+  display: block;
+  height: 100%;
+  border-radius: 0;
+  background: linear-gradient(90deg, var(--gold), var(--gold-2));
+  transition: width 0.3s var(--ease);
+}
+
+/* ------------------------------------------------------------ 卡片 */
+
+.deck {
+  position: relative;
+  padding: 7px 6px 0;
+}
+/* 卡片背后两张「压着的牌」：只用两层缩放 + 位移，不用 3D。
+   目的是让这里看起来像一叠待处理的卡，而不是一个空框。 */
+.deck::before,
+.deck::after {
+  content: "";
+  position: absolute;
+  left: 14px;
+  right: 14px;
+  border-radius: var(--r-lg);
+  background: var(--ink-2);
+  border: 1px solid var(--line);
+  opacity: 0;
+  transition: opacity 0.3s var(--ease), transform 0.3s var(--ease);
+  pointer-events: none;
+}
+.deck::before { bottom: 0; height: 22px; transform: translateY(8px) scale(0.985); }
+.deck::after { bottom: 0; height: 22px; transform: translateY(15px) scale(0.965); }
+.deck.stacked::before { opacity: 1; }
+.deck.stacked::after { opacity: 0.6; }
+
+.fc {
+  position: relative;
+  z-index: 1;
+  min-height: 306px;
+  padding: 22px 26px 20px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  background: var(--ink-2);
+  box-shadow: var(--shadow-card);
+  cursor: pointer;
+  transition: border-color 0.18s, box-shadow 0.18s;
+}
+.fc:hover { border-color: var(--line-2); }
+.fc:focus-visible {
+  outline: 2px solid var(--gold-line);
+  outline-offset: 2px;
+}
+.fc[data-revealed="1"] { cursor: default; }
+
+/* 两层叠在同一格里：容器高度永远等于「两者中更高的那个」，
+   揭示时卡片不会突然长高把下面的按钮顶走。 */
+.fc-inner { display: grid; }
+.fc-front,
+.fc-back {
+  grid-area: 1 / 1;
+  min-width: 0;
+  transition: opacity 0.24s var(--ease-io), transform 0.28s var(--ease);
+}
+.fc-front {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  text-align: center;
+  padding: 34px 0;
+}
+.fc[data-revealed="1"] .fc-front {
+  opacity: 0;
+  visibility: hidden;
+  transform: translateY(-6px);
+}
+.fc-back {
+  opacity: 0;
+  visibility: hidden;
+  transform: translateY(6px);
+}
+.fc[data-revealed="1"] .fc-back {
+  opacity: 1;
+  visibility: visible;
+  transform: none;
+}
+
+.fc-meta {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-wrap: wrap;
+  justify-content: center;
+  max-width: 100%;
+}
+.fc-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 7px;
+  border-radius: 6px;
+  background: var(--violet-soft);
+  color: var(--violet);
+  font-size: 10px;
+  font-weight: 650;
+}
+.fc-note {
+  /* 卡片宽度自适应（桌面 ~1000px、窄窗 ~500px），来源标题交给 ellipsis
+     按真实可用宽度决定截断点，而不是在 JS 里数固定字数。 */
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 10.5px;
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+
+.fc-word {
+  font-family: var(--font-display);
+  font-size: 40px;
+  font-weight: 700;
+  line-height: 1.12;
+  letter-spacing: -0.035em;
+  word-break: break-word;
+}
+.fc-word.small {
+  font-size: 30px;
+  letter-spacing: -0.03em;
+}
+.fc-main {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  max-width: 100%;
+}
+.fc-phon {
+  /* 音标是一个独立的信息行，不是词的后缀：
+     20px 间距 + 独立行高，让「照着它读一遍」这件事发生得自然。 */
+  font-family: var(--font-mono);
+  font-size: 14px;
+  font-weight: 400;
+  line-height: 1.3;
+  letter-spacing: 0;
+  color: var(--text-2);
+}
+
+.fc-hint {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
+  color: var(--text-3);
+}
+.kbd {
+  display: inline-block;
+  min-width: 18px;
+  padding: 1px 5px;
+  border: 1px solid var(--line-2);
+  border-bottom-width: 2px;
+  border-radius: 5px;
+  background: var(--ink-4);
+  color: var(--text-2);
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  line-height: 1.5;
+  text-align: center;
+}
+
+.fc-zh {
+  margin-top: 8px;
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 1.55;
+  color: var(--text-1);
+}
+.fc-pos {
+  margin-right: 6px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--brand-ink);
+}
+.fc-literal {
+  margin-top: 5px;
+  font-size: 11.5px;
+  color: var(--text-3);
+}
+
+.fc-quote {
+  margin-top: 14px;
+  padding: 10px 13px 11px 13px;
+  border-left: 2px solid var(--gold-line);
+  border-radius: 9px;
+  background: var(--ink-4);
+  font-size: 12.5px;
+  line-height: 1.65;
+  color: var(--text-1);
+}
+.fc-quote em {
+  background: var(--gold-soft);
+  box-shadow: inset 0 -1px 0 var(--gold-line);
+  font-style: normal;
+  font-weight: 600;
+}
+.fc-quote .q-zh {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px dashed var(--line-2);
+  font-size: 11.5px;
+  color: var(--text-2);
+}
+.fc-src {
+  margin-top: 10px;
+  font-size: 10.5px;
+  color: var(--text-3);
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+/* ------------------------------------------------------------ 操作区 */
+
+.acts { display: block; }
+.acts-reveal {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 9px;
+}
+.btn-reveal {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  width: 100%;
+  max-width: 320px;
+  height: 48px;
+  border: 1px solid var(--gold-line);
+  border-radius: 13px;
+  background: var(--gold-soft);
+  color: var(--brand-ink);
+  font-family: var(--font-body);
+  font-size: 13.5px;
+  font-weight: 650;
+  cursor: pointer;
+  transition: background 0.16s, border-color 0.16s, transform 0.12s;
+}
+.btn-reveal:hover { border-color: var(--gold-2); }
+.btn-reveal:active { transform: scale(0.985); }
+
+.rates {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+.rate {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  height: 60px;
+  padding: 0 15px;
+  border: 1px solid var(--line-2);
+  border-radius: 14px;
+  font-family: var(--font-body);
+  font-size: 13.5px;
+  font-weight: 650;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.16s, border-color 0.16s, transform 0.12s;
+}
+.rate:active { transform: scale(0.985); }
+.rate .r-ico {
+  width: 30px;
+  height: 30px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  border-radius: 9px;
+}
+.rate .r-txt { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.rate .r-name { line-height: 1.2; }
+.rate .r-hint {
+  font-size: 10px;
+  font-weight: 500;
+  line-height: 1.2;
+  /* 不用 opacity 压字：10px 的小字乘 0.85 后压在同族软底上只剩 3.57，
+     读不出来。改为把语义色往正文灰里混 30% —— 视觉上一样「轻」，
+     但颜色本身是实心的，过 4.5:1。 */
+  color: color-mix(in srgb, currentColor 70%, var(--text-2));
+}
+.rate .r-k {
+  margin-left: auto;
+  flex: none;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 500;
+  /* 快捷键数字同样是实心色：opacity .7 时只有 2.76，几乎看不见。
+     它承担的是「这排按钮可以用键盘按」的可发现性，不能是最淡的元素。 */
+  color: color-mix(in srgb, currentColor 72%, var(--text-2));
+}
+
+/* 三档常态就带色：只靠文字区分时，三个白底灰框在任何距离下都是同一个块。
+   浅色用 12% 软底 + 压深过的语义色文字（都过 4.5:1）。
+   深色用 22% 混 ink-2：14% 透明度压在 #16161f 上会塌成同一个深灰。
+
+   ⚠ 底色只负责「是个按钮」，不负责「区分是哪一档」。三档都是同一族色往
+   白/黑里稀释，透明度扫描过：想靠提高填充度把两两色距拉到肉眼可分的
+   30 以上，琥珀要冲到 48%（#ebcf93 这种糖果色），违反低饱和要求；反之
+   维持 12% 时 forget↔fuzzy 只有 24.5。所以色相由下面的实心色标承担：
+   满色度只占 30px，表面仍然柔和。实测最小色距 43.7（浅）/104.3（深），
+   图标压自身底色 5.64~9.96，全部达标。 */
+.rate-forget {
+  background: var(--red-soft);
+  border-color: color-mix(in srgb, var(--red) 26%, transparent);
+  color: var(--red);
+}
+.rate-fuzzy {
+  background: var(--amber-soft);
+  border-color: color-mix(in srgb, var(--amber) 26%, transparent);
+  color: var(--amber);
+}
+.rate-remember {
+  background: var(--green-soft);
+  border-color: color-mix(in srgb, var(--green) 26%, transparent);
+  color: var(--green);
+}
+.rate-forget .r-ico { background: var(--red); color: var(--ink-2); }
+.rate-fuzzy .r-ico { background: var(--amber); color: var(--ink-2); }
+.rate-remember .r-ico { background: var(--green); color: var(--ink-2); }
+.rate-forget:hover { background: color-mix(in srgb, var(--red) 18%, var(--ink-2)); }
+.rate-fuzzy:hover { background: color-mix(in srgb, var(--amber) 18%, var(--ink-2)); }
+.rate-remember:hover { background: color-mix(in srgb, var(--green) 18%, var(--ink-2)); }
+
+html[data-theme="dark"] .rate-forget {
+  background: color-mix(in srgb, var(--red) 22%, var(--ink-2));
+  border-color: color-mix(in srgb, var(--red) 44%, transparent);
+}
+html[data-theme="dark"] .rate-fuzzy {
+  background: color-mix(in srgb, var(--amber) 22%, var(--ink-2));
+  border-color: color-mix(in srgb, var(--amber) 44%, transparent);
+}
+html[data-theme="dark"] .rate-remember {
+  background: color-mix(in srgb, var(--green) 26%, var(--ink-2));
+  border-color: color-mix(in srgb, var(--green) 50%, transparent);
+}
+html[data-theme="dark"] .rate-forget:hover { background: color-mix(in srgb, var(--red) 30%, var(--ink-2)); }
+html[data-theme="dark"] .rate-fuzzy:hover { background: color-mix(in srgb, var(--amber) 30%, var(--ink-2)); }
+html[data-theme="dark"] .rate-remember:hover { background: color-mix(in srgb, var(--green) 34%, var(--ink-2)); }
+
+@keyframes rateflash {
+  0% { scale: 0.97; }
+  55% { scale: 1.012; }
+  100% { scale: none; }
+}
+.rate.flash { animation: rateflash 0.4s var(--ease); }
+
+/* ------------------------------------------------------------ 空态 / 完成 */
+
+.finish {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  padding: 42px 20px 40px;
+  text-align: center;
+}
+.finish-mark {
+  width: 54px;
+  height: 54px;
+  display: grid;
+  place-items: center;
+  border-radius: 16px;
+  background: var(--gold-soft);
+  color: var(--brand-ink);
+}
+.finish-title {
+  font-family: var(--font-display);
+  font-size: 19px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+.finish-sub {
+  max-width: 400px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-3);
+}
+.finish-sum {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  margin-top: 2px;
+  font-variant-numeric: tabular-nums;
+}
+.finish-sum div {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  align-items: center;
+}
+.finish-sum b {
+  font-family: var(--font-display);
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+.finish-sum span { font-size: 10px; color: var(--text-3); }
+.finish-acts {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: center;
+  margin-top: 4px;
+}
+.finish-sum .is-f b { color: var(--red); }
+.finish-sum .is-z b { color: var(--amber); }
+.finish-sum .is-r b { color: var(--green); }
+
+/* ================================================================ 面板区 */
+
+/* 两栏不等高：左栏（日历）比右栏（评级分布 + 最近复习）矮 168px，
+   页脚于是参差。让日历卡吸收剩余高度，把热力图格子撑大 —— 格子是
+   aspect-ratio:1 的方块，随容器长高，填充是自洽的而不是留白。
+   align-items:stretch 让两个 grid 子项都拉满行高，再由 .panel 内部
+   flex 分配「标题固定 / 日历吃剩余」。 */
+.panels {
+  display: grid;
+  grid-template-columns: minmax(0, 1.55fr) minmax(0, 1fr);
+  gap: 12px;
+  align-items: stretch;
+}
+.side-col {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.panel {
+  min-width: 0;
+  padding: 14px 16px 15px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  background: var(--ink-2);
+  box-shadow: var(--shadow-card);
+}
+/* 只有日历这一张走「吸收剩余高度」模式，其余面板仍按内容高。
+   热力图格子是 26 列 × aspect-ratio:1 的方块，宽度定死了行高（154px），
+   不能靠拉高格子来填 —— 那样只会把方块拉成竖条。
+   所以把多出来的高度均分到「月份标签之上」和「格子之下」两处：
+   标题钉顶、页脚钉底、图表组垂直居中，左右两侧留白对称，
+   读起来是这张卡内部有呼吸，而不是底部忘了填。
+   不要只把 auto 给 .hm-body 的一侧 —— 单侧 auto 会把 180px 全部堆到
+   某一边，标题与图表之间或图表与页脚之间出现一条明显的断层。 */
+.panel.panel-grow {
+  display: flex;
+  flex-direction: column;
+}
+.panel.panel-grow .hm-months {
+  margin-top: auto;
+}
+.panel.panel-grow .hm-body {
+  flex: none;
+  margin-bottom: auto;
+}
+.panel.panel-grow .hm-foot {
+  margin-top: 12px;
+}
+
+/* 右栏两张卡也要撑满。
+   .panels 的 align-items:stretch 只把 .side-col 拉到行高，卡本身默认按内容高 ——
+   空词库时「评级分布 / 最近复习」各只有一句空态文案，于是右栏成了两个小盒子
+   底下挂一大片空白，和左边撑到底的日历卡明显不齐。
+   这里让两张卡按 1 : 1.2 吸收剩余高度（最近复习最多 6 行，多分一点），
+   卡内的空态文案再用 auto 外边距垂直居中，读起来是「这张卡还没数据」，
+   而不是「下面忘了填」。只在宽屏生效：≤1180px 时 .side-col 改成横排。 */
+@media (min-width: 1181px) {
+  .side-col > .panel {
+    display: flex;
+    flex-direction: column;
+    flex: 1 1 auto;
+  }
+  .side-col > .panel:last-child {
+    flex-grow: 1.2;
+  }
+  .side-col .dist,
+  .side-col .recent {
+    flex: 1 1 auto;
+    justify-content: center;
+  }
+  /* 空态块自己带纵向节奏，在居中的 flex 里不需要再叠内边距 */
+  .side-col .dist-empty,
+  .side-col .recent-empty {
+    padding-block: 0;
+  }
+}
+.panel-hd {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+.panel-title {
+  font-family: var(--font-display);
+  font-size: 12.5px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+.panel-sub {
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--text-3);
+}
+
+.hm-legend {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  margin-left: auto;
+  flex: none;
+  font-size: 9.5px;
+  color: var(--text-3);
+  padding-top: 2px;
+}
+.hm-legend i {
+  display: block;
+  width: 9px;
+  height: 9px;
+  border-radius: 2px;
+}
+
+.hm-months {
+  display: grid;
+  grid-template-columns: repeat(var(--hm-weeks, 26), minmax(0, 1fr));
+  gap: 3px;
+  margin: 0 0 4px;
+  padding-left: 22px;
+  font-size: 9.5px;
+  color: var(--text-3);
+  line-height: 1;
+  white-space: nowrap;
+}
+.hm-body {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 6px;
+}
+.hm-dow {
+  display: grid;
+  grid-template-rows: repeat(7, minmax(0, 1fr));
+  gap: 3px;
+  width: 16px;
+  font-size: 9px;
+  color: var(--text-4);
+  text-align: right;
+  line-height: 1;
+}
+.hm-dow span { display: flex; align-items: center; justify-content: flex-end; }
+.hm-grid {
+  display: grid;
+  grid-auto-flow: column;
+  grid-template-rows: repeat(7, minmax(0, 1fr));
+  grid-template-columns: repeat(var(--hm-weeks, 26), minmax(0, 1fr));
+  gap: 3px;
+}
+.hm-cell {
+  aspect-ratio: 1;
+  min-width: 0;
+  border-radius: 3px;
+  background: var(--hm-0);
+  transition: background-color 0.24s var(--ease), outline-color 0.24s;
+}
+.hm-cell.lv1 { background: var(--hm-1); }
+.hm-cell.lv2 { background: var(--hm-2); }
+.hm-cell.lv3 { background: var(--hm-3); }
+.hm-cell.lv4 { background: var(--hm-4); }
+.hm-cell.today { outline: 1.5px solid var(--gold-line); outline-offset: 1px; }
+.hm-cell.pad { background: transparent; }
+
+.hm-foot {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+  margin-top: 12px;
+  padding-top: 11px;
+  border-top: 1px solid var(--line);
+  font-size: 10.5px;
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+.hm-foot b { color: var(--text-1); font-weight: 650; }
+
+/* ------------------------------------------------------------ 评级分布 */
+
+.dist {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.dist-row {
+  display: grid;
+  grid-template-columns: 58px minmax(0, 1fr) 46px;
+  align-items: center;
+  gap: 9px;
+  font-size: 11.5px;
+}
+.dist-name {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--text-2);
+  min-width: 0;
+}
+.dist-name i {
+  width: 6px;
+  height: 6px;
+  flex: none;
+  border-radius: 2px;
+}
+.dist-bar {
+  height: 6px;
+  border-radius: 3px;
+  background: var(--ink-4);
+  overflow: hidden;
+}
+.dist-bar i {
+  display: block;
+  height: 100%;
+  border-radius: 3px;
+  transition: width 0.4s var(--ease);
+}
+.dist-val {
+  text-align: right;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+.dist-val b { color: var(--text-1); font-weight: 600; }
+.dist-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 9px;
+  padding: 14px 6px 4px;
+  text-align: center;
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--text-3);
+}
+/* 空态的小图标：让撑高的面板有个视觉锚点，看着像「这里确实还没数据」，
+   而不是「内容忘填了」。配色压到最低，不跟有数据时的三色条抢注意力。 */
+.empty-ico {
+  width: 30px;
+  height: 30px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  border: 1px dashed var(--line-3);
+  border-radius: 9px;
+  color: var(--text-4);
+}
+.empty-hint {
+  max-width: 240px;
+  text-wrap: pretty;
+}
+
+/* ------------------------------------------------------------ 最近复习 */
+
+.recent { display: flex; flex-direction: column; }
+.recent-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 0;
+  border-bottom: 1px solid var(--line);
+  font-size: 11.5px;
+  min-width: 0;
+}
+.recent-row:last-child { border-bottom: none; }
+.recent-dot {
+  width: 5px;
+  height: 5px;
+  flex: none;
+  border-radius: 50%;
+}
+.recent-w {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-display);
+  font-weight: 600;
+  color: var(--text-1);
+}
+.recent-t {
+  flex: none;
+  font-size: 10px;
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+.recent-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 9px;
+  padding: 12px 6px 6px;
+  text-align: center;
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--text-3);
+}
+
+/* ================================================================ toast */
+
+#wb-toast {
+  position: fixed;
+  left: 50%;
+  bottom: 26px;
+  z-index: 60;
+  transform: translateX(-50%) translateY(10px);
+  padding: 9px 16px;
+  border-radius: 10px;
+  background: var(--text-1);
+  color: var(--ink-2);
+  font-size: 12px;
+  font-weight: 550;
+  box-shadow: var(--shadow-pop);
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition: opacity 0.22s, transform 0.26s;
+  max-width: min(440px, 88vw);
+  text-align: center;
+}
+#wb-toast.on { opacity: 1; visibility: visible; transform: translateX(-50%); }
+#wb-toast[data-kind="err"] { background: var(--danger); color: #fff; }
+
+/* ================================================================ 响应式 */
+
+@media (max-width: 1180px) {
+  .wrap { grid-template-columns: 64px minmax(0, 1fr); }
+  aside { padding: 18px 8px 14px; align-items: center; }
+  .brand { padding-bottom: 12px; }
+  .brand-text, .brand-name, .brand-sub, .side-label,
+  .side-nav span, .goal-lbl, .streak .st-txt, .streak-best,
+  .week-dots, .week-dow, .side-foot { display: none; }
+  .side-nav a, .side-nav button { justify-content: center; padding: 9px 0; }
+  .goal { padding: 10px 6px; border: none; background: transparent; box-shadow: none; }
+  .goal-ring { width: 44px; height: 44px; }
+  .goal-center { font-size: 10px; }
+  .goal-num { font-size: 12px; }
+  .goal-of, .goal-lbl { display: none; }
+  .streak { padding: 8px; border: none; background: transparent; box-shadow: none; }
+  .panels { grid-template-columns: minmax(0, 1fr); }
+  .side-col { flex-direction: row; flex-wrap: wrap; }
+  .side-col > .panel { flex: 1 1 260px; }
+}
+
+@media (max-width: 900px) {
+  main { padding: 22px 18px 48px; }
+  .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .fc-word { font-size: 32px; }
+  .fc-word.small { font-size: 26px; }
+  .fc { padding: 18px 18px 16px; min-height: 272px; }
+  .rates { grid-template-columns: minmax(0, 1fr); gap: 8px; }
+  .rate { height: 52px; }
+  .rate .r-hint { display: none; }
+}
+
+@media (max-width: 620px) {
+  main { padding: 18px 14px 44px; }
+  .top h1 { font-size: 21px; }
+  .fc-word { font-size: 27px; }
+  .fc { min-height: 244px; padding: 16px 15px 14px; }
+  .stage { padding: 12px 12px 14px; border-radius: var(--r-lg); }
+  .stats { grid-template-columns: minmax(0, 1fr); }
+  .hm-months, .hm-grid { --hm-weeks: 14; }
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <!-- ================================================================ 侧栏 -->
+  <aside>
+    <div class="brand">
+      <div class="mark">T</div>
+      <div class="brand-text">
+        <div class="brand-name">Trace</div>
+        <div class="brand-sub">复习台</div>
+      </div>
+    </div>
+
+    <div class="side-label">去向</div>
+    <nav class="side-nav">
+      <button type="button" class="on" title="复习台">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3.5 12a8.5 8.5 0 1 0 2.6-6.1"/><path d="M3.5 19v-5h5"/></svg>
+        <span>复习台</span>
+      </button>
+      <a href="wordbook.html" title="生词本看板">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H19v15.5H6.5A2.5 2.5 0 0 0 4 21z"/><path d="M4 18.5V5.5"/></svg>
+        <span>生词本</span>
+      </a>
+      <button type="button" id="themeBtn" class="theme-btn" title="切换浅色 / 深色主题">
+        <span class="theme-ico">
+          <svg class="i-moon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20.5 14.5A8.5 8.5 0 0 1 9.5 3.5a8.5 8.5 0 1 0 11 11z"/></svg>
+          <svg class="i-sun" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4.2"/><path d="M12 2.2v2.4M12 19.4v2.4M2.2 12h2.4M19.4 12h2.4M5.1 5.1l1.7 1.7M17.2 17.2l1.7 1.7M18.9 5.1l-1.7 1.7M6.8 17.2l-1.7 1.7"/></svg>
+        </span>
+        <span id="themeLabel">深色</span>
+      </button>
+    </nav>
+
+    <div class="side-label push">今日目标</div>
+    <div class="goal">
+      <div class="goal-ring">
+        <svg viewBox="0 0 120 120" aria-hidden="true">
+          <circle class="g-bg" cx="60" cy="60" r="52"></circle>
+          <circle class="g-fill" id="goalFill" cx="60" cy="60" r="52"></circle>
+        </svg>
+        <div class="goal-center">
+          <div class="goal-num" id="goalNow">0</div>
+          <div class="goal-of" id="goalOf">/ 20 道</div>
+        </div>
+      </div>
+      <div class="goal-lbl" id="goalLbl">今天还没开始</div>
+    </div>
+
+    <div class="streak">
+      <span class="st-ico">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 21a6 6 0 0 0 6-6c0-4.6-4.3-7.3-4.3-10.5C14 4.2 12.4 5.6 12 7.4c-.6-1.2-1.5-1.9-1.5-1.9S5.9 8 5.9 12.2A6 6 0 0 0 12 21z"/><path d="M12 21a2.6 2.6 0 0 0 2.6-2.6c0-2-2.6-3.6-2.6-3.6s-2.6 1.6-2.6 3.6A2.6 2.6 0 0 0 12 21z"/></svg>
+      </span>
+      <div class="st-txt">
+        <div class="streak-n" id="stNow">0</div>
+        <div class="streak-l">连续打卡（天）</div>
+      </div>
+      <div class="streak-best">最长<b id="stBest">0</b></div>
+    </div>
+
+    <div class="week-dow">
+      <span>一</span><span>二</span><span>三</span><span>四</span><span>五</span><span>六</span><span>日</span>
+    </div>
+    <div class="week-dots" id="weekDots"></div>
+
+    <div class="side-foot">
+      打卡与评级只存在本机 IndexedDB，不上传任何服务器。
+    </div>
+  </aside>
+
+  <!-- ================================================================ 主区 -->
+  <main>
+    <header class="top">
+      <div class="top-title">
+        <h1>Trace <span class="accent">复习台</span></h1>
+        <p class="sub" id="subLine">正在读取…</p>
+      </div>
+      <div class="top-tools">
+        <button type="button" class="tool" id="restartBtn" title="重新打乱本轮顺序，从头再来">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3.5 12a8.5 8.5 0 1 0 2.6-6.1"/><path d="M3.5 19v-5h5"/></svg>
+          <span>重开一轮</span>
+        </button>
+        <a class="tool tool-key" href="wordbook.html" title="打开生词本看板">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H19v15.5H6.5A2.5 2.5 0 0 0 4 21z"/><path d="M4 18.5V5.5"/></svg>
+          <span>生词本</span>
+        </a>
+      </div>
+    </header>
+
+    <!-- 统计条 -->
+    <section class="stats">
+      <div class="stat">
+        <div class="stat-top">
+          <span class="stat-lbl">连续打卡</span>
+          <span class="stat-ico" style="background: var(--gold-soft); color: var(--brand-ink)">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 21a6 6 0 0 0 6-6c0-4.6-4.3-7.3-4.3-10.5C14 4.2 12.4 5.6 12 7.4c-.6-1.2-1.5-1.9-1.5-1.9S5.9 8 5.9 12.2A6 6 0 0 0 12 21z"/></svg>
+          </span>
+        </div>
+        <div class="stat-val" id="kStreak">0<span class="sm"> 天</span></div>
+        <div class="stat-sub" id="dStreak">最长 0 天</div>
+      </div>
+
+      <div class="stat">
+        <div class="stat-top">
+          <span class="stat-lbl">今日已复习</span>
+          <span class="stat-ico" style="background: var(--violet-soft); color: var(--violet)">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6L9 17l-5-5"/></svg>
+          </span>
+        </div>
+        <div class="stat-val" id="kToday">0<span class="sm"> 道</span></div>
+        <div class="stat-sub" id="dToday">目标 20 道</div>
+      </div>
+
+      <div class="stat">
+        <div class="stat-top">
+          <span class="stat-lbl">待复习</span>
+          <span class="stat-ico" style="background: var(--amber-soft); color: var(--amber)">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="8.4"/><path d="M12 7.4V12l3.1 1.9"/></svg>
+          </span>
+        </div>
+        <div class="stat-val" id="kDue">0<span class="sm"> 个</span></div>
+        <div class="stat-sub" id="dDue">全部是新词</div>
+      </div>
+
+      <div class="stat">
+        <div class="stat-top">
+          <span class="stat-lbl">累计复习</span>
+          <span class="stat-ico" style="background: var(--green-soft); color: var(--green)">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 9h4l2.5-4 3 12 2.5-8h4"/></svg>
+          </span>
+        </div>
+        <div class="stat-val" id="kAll">0<span class="sm"> 次</span></div>
+        <div class="stat-sub" id="dAll">已记住 0 个</div>
+      </div>
+    </section>
+
+    <!-- 复习舞台 -->
+    <section class="stage" id="stage" aria-label="复习卡片">
+      <div class="stage-bar">
+        <div class="prog-lbl" id="progLbl">第 <b>1</b> / <b>1</b> 个</div>
+        <div class="prog" id="prog"></div>
+      </div>
+
+      <div class="deck" id="deck">
+        <div class="fc" id="fc" role="button" tabindex="0" aria-label="复习卡片，点击或按空格查看释义">
+          <div class="fc-inner">
+            <div class="fc-front" id="fcFront"></div>
+            <div class="fc-back" id="fcBack" aria-live="polite"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="acts" id="acts"></div>
+    </section>
+
+    <!-- 面板 -->
+    <section class="panels">
+      <div class="panel panel-grow">
+        <div class="panel-hd">
+          <div>
+            <div class="panel-title">打卡日历</div>
+            <div class="panel-sub" id="hmSub">最近 26 周 · 每格是一个自然日</div>
+          </div>
+          <div class="hm-legend">
+            <span>少</span>
+            <i style="background: var(--hm-1)"></i>
+            <i style="background: var(--hm-2)"></i>
+            <i style="background: var(--hm-3)"></i>
+            <i style="background: var(--hm-4)"></i>
+            <span>多</span>
+          </div>
+        </div>
+        <div class="hm-months" id="hmMonths"></div>
+        <div class="hm-body">
+          <div class="hm-dow"><span>一</span><span></span><span>三</span><span></span><span>五</span><span></span><span></span></div>
+          <div class="hm-grid" id="hmGrid"></div>
+        </div>
+        <div class="hm-foot" id="hmFoot"></div>
+      </div>
+
+      <div class="side-col">
+        <div class="panel">
+          <div class="panel-title">评级分布</div>
+          <div class="panel-sub" id="distSub" style="margin-bottom: 11px">本轮与历史合计</div>
+          <div class="dist" id="dist"></div>
+        </div>
+        <div class="panel">
+          <div class="panel-title" style="margin-bottom: 4px">最近复习</div>
+          <div class="recent" id="recent"></div>
+        </div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<div id="wb-toast" role="status" aria-live="polite"></div>
+<script src="review.js"></script>
+</body>
+</html>

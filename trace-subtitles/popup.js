@@ -421,9 +421,22 @@ function filterWords() {
 
 $('wordSearch').addEventListener('input', filterWords);
 
+// 导出成 JSON 文件。和词库页同一套约束：只有真拿到非空数组才落盘，
+// 否则后台出错时会生成一个 2 字节的空 JSON，用户还以为是导出成功了。
 $('exportWords').addEventListener('click', async () => {
-  const r = await chrome.runtime.sendMessage({ type: 'word:export' });
-  const data = r && r.ok ? r.data : [];
+  let data;
+  try {
+    const r = await chrome.runtime.sendMessage({ type: 'word:export' });
+    if (!r || !r.ok) throw new Error((r && r.error) || '后台没有返回数据');
+    data = r.data;
+  } catch (e) {
+    $('wordStat').textContent = '导出失败：' + ((e && e.message) || e);
+    return;
+  }
+  if (!Array.isArray(data) || data.length === 0) {
+    $('wordStat').textContent = '生词本是空的，没有可导出的内容';
+    return;
+  }
   const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');

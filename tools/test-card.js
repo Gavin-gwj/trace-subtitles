@@ -165,9 +165,14 @@ async function readCard(page) {
 
   // 用 vessel 当主角：它正是用户图二里信息最少那个词，
   // 而且 dictionaryapi.dev 对它永久超时 —— 最能验证 Datamuse 兜底是否生效。
+  // 时间窗必须远长于「加载页面 + 抓轨 + 翻译往返 + 读卡片」的最坏耗时。
+  // 早先这里是 0–3s / 3–5s 两条，机器一忙（全量跑时尤其）就会在等到译文前
+  // 播过最后一条 cue → 覆盖层切到 .trace-empty、.trace-sub-trans 变空 →
+  // waitForFunction 永远等不到非空译文而 30s 超时。表现为「单跑 PASS、全量偶发 FAIL」。
+  // 断言不依赖具体时间点，所以把两条各拉到 30 秒即可（总长 60s）。
   const CUES = [
-    [0.0, 3.0, 'They boarded the vessel at dawn.'],
-    [3.0, 2.0, 'The vessel sailed away.'],
+    [0.0, 30.0, 'They boarded the vessel at dawn.'],
+    [30.0, 30.0, 'The vessel sailed away.'],
   ];
 
   await ctx.route('https://www.youtube.com/**', async (route) => {

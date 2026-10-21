@@ -264,7 +264,11 @@ function check(name, ok, info) {
     const root = await navigator.storage.getDirectory();
     const dir = await root.getDirectoryHandle('my-backup-folder', { create: true });
     const db = await new Promise((resolve, reject) => {
-      const req = indexedDB.open('trace-subs', 2);
+      // 不写版本号：打开「当前版本」。写死 2 的话，bg.js 一旦升 DB_VER
+      // （比如加 reviewlog store）这里就会抛 VersionError: The requested
+      // version (2) is less than the existing version (3)。测试不该跟着
+      // 内部实现版本号走。
+      const req = indexedDB.open('trace-subs');
       req.onupgradeneeded = () => {
         const d = req.result;
         if (!d.objectStoreNames.contains('translations')) {
@@ -377,7 +381,8 @@ function check(name, ok, info) {
   // 清除目录设置后，应退回「下载」目录
   await page.evaluate(async () => {
     const db = await new Promise((resolve, reject) => {
-      const req = indexedDB.open('trace-subs', 2);
+      // 同上：打开当前版本，不锁定版本号
+      const req = indexedDB.open('trace-subs');
       req.onsuccess = () => resolve(req.result);
       req.onerror = () => reject(req.error);
     });
@@ -395,6 +400,142 @@ function check(name, ok, info) {
     'S28 清除目录后自动退回下载目录',
     !!(fallback && fallback.ok && fallback.via === 'download'),
     { via: fallback && fallback.via }
+  );
+
+  // 自动备份路径：没有目录时必须什么都不写。
+  // 这是用户抱怨的那件事 —— 没选目录时每次复习都往「下载」扔一个
+  // wordbook-backup.json，下载列表堆成一串同名文件。
+  const autoNoDir = await sw.evaluate(async () => {
+    const D = globalThis.__traceDebug;
+    const before = (await chrome.downloads.search({})).length;
+    const r = await D.backupToFile({ download: false });
+    await new Promise((res) => setTimeout(res, 900)); // 够 download 真被创建出来
+    const after = (await chrome.downloads.search({})).length;
+    return { r, before, after };
+  });
+  // backup:auto 要从页面发：service worker 自己 sendMessage 不会回到自己
+  const autoMsg = await page.evaluate(async () => {
+    const r = await chrome.runtime.sendMessage({ type: 'backup:auto' });
+    return r && r.data;
+  });
+  check(
+    'S29 没选目录时自动备份跳过，不产生任何下载',
+    !!(
+      autoNoDir.r &&
+      autoNoDir.r.skipped === true &&
+      autoNoDir.before === autoNoDir.after &&
+      autoMsg &&
+      autoMsg.skipped === true &&
+      autoMsg.reason === 'no-dir'
+    ),
+    { ...autoNoDir, autoMsg }
+  );
+
+  // 跳过不等于失败：不能因为「没选目录」把 autoBackupFails 记上一笔，
+  // 否则连续三次复习之后自动备份就被自己关掉了。
+  const autoWithDir = await sw.evaluate(async () => {
+    const D = globalThis.__traceDebug;
+    const r = await D.backupToFile({ download: false });
+    const st = await D.getSettings();
+    return { r, fails: st.autoBackupFails, autoBackup: st.autoBackup };
+  });
+  check(
+    'S30 没目录时自动备份是跳过而不是报错（不消耗失败计数）',
+    !!(
+      autoWithDir.r &&
+      autoWithDir.r.skipped === true &&
+      !autoWithDir.r.error &&
+      autoWithDir.fails === 0 &&
+      autoWithDir.autoBackup !== false
+    ),
+    autoWithDir
+  );
+
+  // 「导出 JSON」不能因为失败就塞一个空文件给用户。
+  // 空词库时点导出，应当只看到提示，下载列表里不该多出任何东西。
+  const exportEmpty = await (async () => {
+    await page.evaluate(async () => {
+      const db = await new Promise((resolve, reject) => {
+        const req = indexedDB.open('trace-subs');
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => reject(req.error);
+      });
+      await new Promise((resolve) => {
+        const tx = db.transaction('words', 'readwrite');
+        tx.objectStore('words').clear();
+        tx.oncomplete = () => resolve(true);
+        tx.onerror = () => resolve(false);
+      });
+      db.close();
+    });
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    await page.waitForTimeout(700);
+    const before = (await sw.evaluate(() => chrome.downloads.search({}))).length;
+    await page.click('#exportBtn');
+    await page.waitForTimeout(1200);
+    const after = (await sw.evaluate(() => chrome.downloads.search({}))).length;
+    const text = await page.evaluate(() => {
+      const el = document.getElementById('wb-toast');
+      return el ? el.textContent : '';
+    });
+    return { before, after, text };
+  })();
+  check(
+    'S31 空词库点导出：只提示，不下载空文件',
+    !!(exportEmpty.before === exportEmpty.after && /空了|没有可导出/.test(exportEmpty.text)),
+    exportEmpty
+  );
+
+  // 反过来：真的导出时仍然要落盘一个真文件（不能为了「别乱下载」把功能也关掉）
+  const exportReal = await (async () => {
+    await sw.evaluate(async () => {
+      const D = globalThis.__traceDebug;
+      const now = Date.now();
+      for (const w of ['alpha', 'beta', 'gamma']) {
+        await D.idbPut('words', {
+          word: w,
+          display: w,
+          zh: `${w}-中文`,
+          context: `a sentence with ${w}`,
+          createdAt: now,
+          reviewCount: 0,
+          status: 'new',
+        });
+      }
+    });
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    await page.waitForTimeout(700);
+    const before = (await sw.evaluate(() => chrome.downloads.search({}))).length;
+    await page.click('#exportBtn');
+    // 等下载真的写完（state=complete），再读文件；只 sleep 固定时间是赌。
+    // 注意 search 的返回顺序不保证按时间，得自己挑 startTime 最大的那条。
+    const item = await (async () => {
+      for (let i = 0; i < 80; i++) {
+        const items = await sw.evaluate(() => chrome.downloads.search({}));
+        if (items.length > before) {
+          const last = items.slice().sort((a, b) => (b.startTime || '').localeCompare(a.startTime || ''))[0];
+          if (last && (last.state === 'complete' || last.state === 'interrupted')) return last;
+        }
+        await page.waitForTimeout(100);
+      }
+      return null;
+    })();
+    const items = await sw.evaluate(() => chrome.downloads.search({}));
+    return { before, after: items.length, last: item };
+  })();
+  let exportedWords = null;
+  if (exportReal.after > exportReal.before && exportReal.last && exportReal.last.filename) {
+    try {
+      const j = JSON.parse(fs.readFileSync(exportReal.last.filename, 'utf8'));
+      exportedWords = Array.isArray(j) ? j.length : null;
+    } catch (e) {
+      exportedWords = null;
+    }
+  }
+  check(
+    'S32 有词的导出仍然正常落盘（3 条）',
+    !!(exportReal.after === exportReal.before + 1 && exportedWords === 3),
+    { before: exportReal.before, after: exportReal.after, exportedWords }
   );
 
   await ctx.close();
