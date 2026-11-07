@@ -1,6 +1,11 @@
 # 依赖
 node_modules/
 package-lock.json
+!website/package-lock.json
+website/.npm-cache/
+website/dist/
+website/dist-pages/
+website/tools/*.png
 
 # 测试用的临时 Chrome profile（Playwright 生成，含缓存与登录态，绝不入库）
 .chrome*/
